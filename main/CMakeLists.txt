@@ -5,6 +5,7 @@ idf_component_register(SRCS "main.cpp"
                             "claw_controller.cpp"
                             "cam_controller.cpp"
                             "web_server.cpp"
+                            "web_html.cpp"
                             "ble_manager.cpp"
                             "audio_player.cpp"
                     INCLUDE_DIRS ".")
