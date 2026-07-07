@@ -1,3 +1,4 @@
+// main\web_html.cpp
 #include "web_html.h"
 
 // -------------------------------------------------------------
@@ -209,6 +210,10 @@ const char HTML_CLAW_UI[] = R"raw_html(
                 <button class="btn-purple" onclick="c('half_close')">Half Close</button>
             </div>
             
+            <hr style="border-color:#334155; margin: 15px 0;">
+            <div class="text-sm">PyController Gamepad Setup</div>
+            <button class="btn-purple" onclick="pairESPNOW()">Connect to PyController</button>
+            
             <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
         </div>
         
@@ -268,6 +273,14 @@ const char HTML_CLAW_UI[] = R"raw_html(
         }
         function updateAngleLabel(val){ document.getElementById('sliderVal').innerText = val; }
         
+        function pairESPNOW() {
+            document.getElementById('cstat').innerText = 'Pairing with PyController...';
+            fetch('/espnow_pair', {method: 'POST'}).then(r=>r.text()).then(t=>{
+                document.getElementById('cstat').innerText = 'Status: ' + t;
+                setTimeout(loadStatus, 600);
+            });
+        }
+
         let camActive = false;
         function toggleCamera() {
             camActive = !camActive;

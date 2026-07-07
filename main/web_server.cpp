@@ -1,3 +1,4 @@
+// main\web_server.cpp
 #include "web_server.h"
 #include "web_html.h"
 #include "wifi_manager.h"
@@ -243,6 +244,13 @@ static esp_err_t switch_mode_post_handler(httpd_req_t *req) {
         cJSON_Delete(json);
         httpd_resp_sendstr(req, "OK");
     }
+    return ESP_OK;
+}
+
+static esp_err_t espnow_pair_post_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    cam_espnow_pair_claw();
+    httpd_resp_sendstr(req, "Pairing Broadcast Sent");
     return ESP_OK;
 }
 
@@ -545,9 +553,12 @@ void web_server_init() {
                 httpd_uri_t uri_claw   = { .uri = "/claw",   .method = HTTP_GET, .handler = claw_get_handler,   .user_ctx = NULL };
                 httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET, .handler = claw_status_get_handler, .user_ctx = NULL };
                 httpd_uri_t uri_ccap   = { .uri = "/capture",.method = HTTP_GET, .handler = cam_capture_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_pair   = { .uri = "/espnow_pair",.method = HTTP_POST, .handler = espnow_pair_post_handler, .user_ctx = NULL };
+                
                 httpd_register_uri_handler(server, &uri_claw);
                 httpd_register_uri_handler(server, &uri_status);
                 httpd_register_uri_handler(server, &uri_ccap);
+                httpd_register_uri_handler(server, &uri_pair);
             } else if (is_cam_mode) {
                 httpd_uri_t uri_cset   = { .uri = "/setup",  .method = HTTP_GET, .handler = cam_setup_get_handler, .user_ctx = NULL };
                 httpd_uri_t uri_capp   = { .uri = "/app",    .method = HTTP_GET, .handler = cam_app_get_handler,   .user_ctx = NULL };

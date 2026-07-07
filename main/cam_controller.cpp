@@ -1,4 +1,6 @@
+// main\cam_controller.cpp
 #include "cam_controller.h"
+#include "claw_controller.h"
 #include "esp_camera.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
@@ -13,6 +15,8 @@
 #include <string.h>
 
 static const char *TAG = "CAM_CTRL";
+
+extern bool is_claw_mode;
 
 // ----------------------------------------------------
 // Seeed Studio XIAO ESP32S3 Sense OV2640 Pinout
@@ -38,6 +42,7 @@ volatile bool isCapturing = false;
 static volatile bool isConnected = false;
 static volatile bool captureRequested = false;
 static volatile bool is_streaming = false;
+static bool espnow_initialized = false;
 
 static uint8_t pyControllerMac[6];
 static uint8_t cam_mac[6];
@@ -81,6 +86,26 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingD
     }
     else if (len >= 11 && strncmp((const char*)incomingData, "pyCAM_STR_0", 11) == 0) {
         is_streaming = false;
+    }
+    // Listen for PyController Gamepad Controller payloads
+    else if (len == 6 && incomingData[0] == 67) {
+        if (is_claw_mode) {
+            uint8_t btns = incomingData[5];
+            uint8_t dpad = btns & 0x0F; // Mask out the A/B/X/Y face buttons
+            static uint8_t last_dpad = 8;
+            
+            if (dpad != last_dpad) {
+                // Left D-Pad triggers "Open"
+                if (dpad == 6 || dpad == 5 || dpad == 7) { 
+                    claw_execute_command("open");
+                } 
+                // Right D-Pad triggers "Close"
+                else if (dpad == 2 || dpad == 1 || dpad == 3) { 
+                    claw_execute_command("close");
+                }
+                last_dpad = dpad;
+            }
+        }
     }
 }
 
@@ -303,6 +328,8 @@ void cam_controller_init() {
 }
 
 void cam_espnow_init() {
+    if (espnow_initialized) return;
+    
     esp_wifi_get_mac(WIFI_IF_STA, cam_mac);
     
     if (esp_now_init() != ESP_OK) {
@@ -314,4 +341,32 @@ void cam_espnow_init() {
     ESP_LOGI(TAG, "ESP-NOW Subsystem initialized. Waiting for PyController broadcasts...");
     
     xTaskCreatePinnedToCore(cam_espnow_task, "ESPNOW_Task", 4096, NULL, 3, NULL, 1);
+    espnow_initialized = true;
+}
+
+void cam_espnow_pair_claw() {
+    // Make sure it's fully initialized to accept connections
+    if (!espnow_initialized) {
+        cam_espnow_init();
+    }
+    
+    uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_peer_info_t peerInfo = {};
+    peerInfo.channel = 1;
+    peerInfo.ifidx = WIFI_IF_STA;
+    peerInfo.encrypt = false;
+    memcpy(peerInfo.peer_addr, broadcast_mac, 6);
+    
+    if (!esp_now_is_peer_exist(broadcast_mac)) {
+        esp_now_add_peer(&peerInfo);
+    }
+    
+    // Announce Claw Controller presence to PyController
+    const char* ackMsg = "pyCAR_ACK";
+    esp_now_send(broadcast_mac, (const uint8_t *)ackMsg, strlen(ackMsg));
+    
+    const char* camAckMsg = "pyCAM_ACK";
+    esp_now_send(broadcast_mac, (const uint8_t *)camAckMsg, strlen(camAckMsg));
+    
+    ESP_LOGI(TAG, "Broadcasted ESP-NOW Pair Request to PyController");
 }
