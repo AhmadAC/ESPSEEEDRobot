@@ -242,6 +242,10 @@ const char HTML_CLAW_UI[] = R"raw_html(
             <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative;">
                 <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto;">
             </div>
+            <div id="camControls" style="display:none; margin-bottom: 15px;">
+                <button id="snapBtn" class="btn-green" onclick="takeSnapshot()">Save Snapshot</button>
+                <div id="camStatus" class="text-sm" style="margin-top: 10px;">Streaming live...</div>
+            </div>
             <button id="camToggleBtn" class="btn-blue" onclick="toggleCamera()">Turn Camera ON</button>
         </div>
 
@@ -295,17 +299,54 @@ const char HTML_CLAW_UI[] = R"raw_html(
             const container = document.getElementById('streamContainer');
             const img = document.getElementById('streamImg');
             const btn = document.getElementById('camToggleBtn');
+            const ctrl = document.getElementById('camControls');
             if (camActive) {
                 img.src = 'http://' + window.location.hostname + ':81/';
                 container.style.display = 'block';
+                ctrl.style.display = 'block';
                 btn.innerText = 'Turn Camera OFF';
                 btn.className = 'btn-red';
             } else {
                 img.src = '';
                 container.style.display = 'none';
+                ctrl.style.display = 'none';
                 btn.innerText = 'Turn Camera ON';
                 btn.className = 'btn-blue';
             }
+        }
+        
+        function takeSnapshot() {
+            const btn = document.getElementById('snapBtn');
+            const status = document.getElementById('camStatus');
+            btn.disabled = true;
+            status.innerText = "Capturing high-resolution image...";
+
+            fetch('/capture')
+                .then(response => {
+                    if (!response.ok) throw new Error('Capture failed');
+                    return response.blob();
+                })
+                .then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    a.download = `snapshot_${timestamp}.jpg`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    status.innerText = "Snapshot saved!";
+                    btn.disabled = false;
+                    setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
+                })
+                .catch(err => {
+                    console.error(err);
+                    status.innerText = "Error taking snapshot.";
+                    alert("Capture Error! Check Serial Monitor.");
+                    btn.disabled = false;
+                });
         }
         
         function scan(){
@@ -1023,7 +1064,7 @@ static esp_err_t cam_app_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t cam_capture_get_handler(httpd_req_t *req) {
-    if (!is_cam_mode) return ESP_FAIL;
+    if (!is_cam_mode && !is_claw_mode) return ESP_FAIL;
     
     isCapturing = true; 
     vTaskDelay(pdMS_TO_TICKS(200)); 
@@ -1479,8 +1520,10 @@ void web_server_init() {
             if (is_claw_mode) {
                 httpd_uri_t uri_claw   = { .uri = "/claw",   .method = HTTP_GET, .handler = claw_get_handler,   .user_ctx = NULL };
                 httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET, .handler = claw_status_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_ccap   = { .uri = "/capture",.method = HTTP_GET, .handler = cam_capture_get_handler, .user_ctx = NULL };
                 httpd_register_uri_handler(server, &uri_claw);
                 httpd_register_uri_handler(server, &uri_status);
+                httpd_register_uri_handler(server, &uri_ccap);
             } else if (is_cam_mode) {
                 httpd_uri_t uri_cset   = { .uri = "/setup",  .method = HTTP_GET, .handler = cam_setup_get_handler, .user_ctx = NULL };
                 httpd_uri_t uri_capp   = { .uri = "/app",    .method = HTTP_GET, .handler = cam_app_get_handler,   .user_ctx = NULL };
