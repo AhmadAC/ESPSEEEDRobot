@@ -38,6 +38,8 @@ static void console_read_task(void *pvParameter) {
     ESP_LOGI("REPL", "  reset      - Factory Reset NVS (Restores Settings)");
     ESP_LOGI("REPL", "  sound      - Enable Audio UI");
     ESP_LOGI("REPL", "  no sound   - Disable & Hide Audio UI");
+    ESP_LOGI("REPL", "  0-180      - Set Claw Angle (Claw Mode)");
+    ESP_LOGI("REPL", "  open/close/half - Toggle Claw (Claw Mode)");
     ESP_LOGI("REPL", "  (Ctrl+C)   - Stop Motors / Relax Claw");
     ESP_LOGI("REPL", "  (Ctrl+D)   - Soft Reboot");
     ESP_LOGI("REPL", "==================================================");
@@ -157,11 +159,29 @@ static void console_read_task(void *pvParameter) {
                             }
                             vTaskDelay(pdMS_TO_TICKS(500));
                             esp_restart();
-                        } else if (strncmp(cmd, "angle ", 6) == 0 && is_claw_mode) {
-                            int ang = atoi(cmd + 6);
-                            claw_set_angle(ang);
                         } else if (is_claw_mode) {
-                            claw_execute_command(cmd);
+                            // Check if the command is purely numeric
+                            bool is_numeric = true;
+                            int cmd_len = strlen(cmd);
+                            for (int j = 0; j < cmd_len; j++) {
+                                if (cmd[j] < '0' || cmd[j] > '9') {
+                                    is_numeric = false;
+                                    break;
+                                }
+                            }
+                            
+                            // Route the Claw actions dynamically
+                            if (strncmp(cmd, "angle ", 6) == 0) {
+                                int ang = atoi(cmd + 6);
+                                claw_set_angle(ang);
+                            } else if (is_numeric && cmd_len > 0) {
+                                int ang = atoi(cmd);
+                                claw_set_angle(ang);
+                            } else if (strcmp(cmd, "half") == 0) {
+                                claw_execute_command("half_open");
+                            } else {
+                                claw_execute_command(cmd); // "open", "close", "half_open", etc.
+                            }
                         }
                         cmd_idx = 0;
                     }
