@@ -15,12 +15,15 @@
 #include "sensor_monitor.h"
 #include "servo_controller.h"
 #include "claw_controller.h"
+#include "cam_controller.h"
 #include "web_server.h"
 #include "ble_manager.h"
 #include "audio_player.h"
 
 static const char *TAG = "MAIN";
-bool is_claw_mode = false; // Global flag
+
+bool is_claw_mode = false; 
+bool is_cam_mode = false; 
 
 // FreeRTOS task to monitor standard input for REPL control characters
 static void console_read_task(void *pvParameter) {
@@ -28,6 +31,7 @@ static void console_read_task(void *pvParameter) {
     ESP_LOGI("REPL", "Available Device REPL Commands:");
     ESP_LOGI("REPL", "  mode claw  - Switch to Claw Controller Profile");
     ESP_LOGI("REPL", "  mode robot - Switch to ESPRobot Profile");
+    ESP_LOGI("REPL", "  mode cam   - Switch to Raw Camera Profile");
     ESP_LOGI("REPL", "  ap         - Force AP Mode (Wi-Fi Hotspot)");
     ESP_LOGI("REPL", "  wifi       - Connect to saved Wi-Fi");
     ESP_LOGI("REPL", "  bt         - Switch to Bluetooth Control");
@@ -53,7 +57,7 @@ static void console_read_task(void *pvParameter) {
                 if (buf[i] == 0x03) { // Ctrl+C (Interrupt)
                     ESP_LOGW("REPL", "[Sent Ctrl+C - Interrupt]");
                     if (is_claw_mode) claw_execute_command("stop");
-                    else servo_set_action("stop");
+                    else if (!is_cam_mode) servo_set_action("stop");
                 } else if (buf[i] == 0x04) { // Ctrl+D (Soft Reboot)
                     ESP_LOGW("REPL", "[Sent Ctrl+D - Soft Reboot]");
                     vTaskDelay(pdMS_TO_TICKS(100));
@@ -86,6 +90,16 @@ static void console_read_task(void *pvParameter) {
                             nvs_handle_t h;
                             if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
                                 nvs_set_str(h, "dev_mode", "robot");
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "mode cam") == 0) {
+                            ESP_LOGW("REPL", "Command 'mode cam' received. Switching profile...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_set_str(h, "dev_mode", "cam");
                                 nvs_commit(h);
                                 nvs_close(h);
                             }
@@ -187,14 +201,20 @@ extern "C" void app_main(void) {
     }
     
     is_claw_mode = (strcmp(dev_mode, "claw") == 0);
+    is_cam_mode = (strcmp(dev_mode, "cam") == 0);
 
     // 4. Boot Modular Components
     if (is_claw_mode) {
         ESP_LOGI(TAG, "Booting Device Profile: CLAW");
         claw_controller_init();
-        
         ESP_LOGI(TAG, "Booting in WI-FI Mode.");
         wifi_manager_init();
+        web_server_init();
+    } else if (is_cam_mode) {
+        ESP_LOGI(TAG, "Booting Device Profile: CAM");
+        wifi_manager_init(); // Needs to initialize before ESP-NOW
+        cam_controller_init();
+        cam_espnow_init();
         web_server_init();
     } else {
         ESP_LOGI(TAG, "Booting Device Profile: ROBOT");
