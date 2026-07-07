@@ -2,6 +2,7 @@
 #include "wifi_manager.h"
 #include "sensor_monitor.h"
 #include "servo_controller.h"
+#include "claw_controller.h"
 #include "audio_player.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -14,14 +15,145 @@
 static const char *TAG = "WEB";
 httpd_handle_t server = NULL;
 
+extern bool is_claw_mode; 
+
 static void delayed_reboot_task(void *pvParameter) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
 }
 
 // -------------------------------------------------------------
-// DYNAMIC HTML PARTITIONS
-// Split up to allow omitting audio segments via 'no sound'
+// DYNAMIC CLAW HTML PAYLOAD
+// -------------------------------------------------------------
+const char HTML_CLAW_UI[] = R"raw_html(
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Claw Controller</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    :root { --primary: #0ea5e9; --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; }
+    body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 15px; display: flex; flex-direction: column; align-items: center; margin:0; }
+    .container { width: 100%; max-width: 500px; }
+    .card { background: var(--card); padding: 25px; border-radius: 20px; border: 1px solid #334155; text-align: center; margin-bottom: 20px; }
+    h2 { color: var(--primary); margin-top: 0; }
+    input[type=password], select { width: 100%; padding: 12px; margin: 8px 0 20px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: white; box-sizing: border-box; }
+    input[type=range] { width: 100%; margin: 15px 0; accent-color: #0ea5e9; }
+    button { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; margin-top:10px; transition: transform 0.1s; }
+    button:active { transform: scale(0.96); opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-green { background: #10b981; }
+    .btn-red { background: #ef4444; }
+    .btn-blue { background: #3b82f6; }
+    .btn-purple { background: #8b5cf6; }
+    .btn-gray { background: #475569; }
+    .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; margin-bottom:15px; }
+    .text-sm { font-size: 0.85rem; color: #94a3b8; margin-bottom:10px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar">CLAW DASHBOARD</div>
+
+        <div class="card">
+            <h2>Control Claw</h2>
+            <div class="text-sm"><b>State:</b> <span id="lastcmd" style="color:#3b82f6;">Loading...</span> | <b>Angle:</b> <span id="curangle" style="color:#10b981;">--</span>°</div>
+            
+            <input type="range" id="angleSlider" min="0" max="180" value="90" oninput="updateAngleLabel(this.value)" onchange="setAngle(this.value)">
+            <div class="text-sm" style="margin-bottom: 20px;">Target Slider: <span id="sliderVal">90</span>°</div>
+
+            <div class="grid-2">
+                <button class="btn-green" onclick="c('open')">Open (180°)</button>
+                <button class="btn-red" onclick="c('close')">Close (0°)</button>
+                <button class="btn-blue" onclick="c('half_open')">Half Open</button>
+                <button class="btn-purple" onclick="c('half_close')">Half Close</button>
+            </div>
+            
+            <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
+        </div>
+
+        <div class="card">
+            <h2>Wi-Fi Settings</h2>
+            <div id="status" class="text-sm">Ready to Scan</div>
+            <button class="btn-gray" onclick="scan()">Scan Networks</button>
+            
+            <select id="ssid" style="margin-top:15px;"><option value="">-- Select --</option></select>
+            <input type="password" id="pass" placeholder="Password">
+            
+            <button class="btn-green" onclick="save()">Save and Connect</button>
+            
+            <hr style="border-color:#334155; margin: 25px 0;">
+            <div class="text-sm">Quick Boot Mode Switch</div>
+            <div class="grid-2">
+                <button style="background:#f59e0b;" onclick="forceAP()">Force AP</button>
+                <button style="background:#10b981;" onclick="forceWiFi()">Use Wi-Fi</button>
+            </div>
+            
+            <hr style="border-color:#334155; margin: 25px 0;">
+            <div class="text-sm">Hardware Profile (Reboot Required)</div>
+            <div class="grid-2">
+                <button class="btn-purple" disabled>✓ Claw Mode</button>
+                <button class="btn-gray" onclick="setMode('robot')">Robot Mode</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function c(cmd){
+            document.getElementById('cstat').innerText = 'Sending Preset...';
+            fetch('/claw?cmd='+cmd).then(r=>r.text()).then(t=>{
+                document.getElementById('cstat').innerText = 'Status: ' + t;
+                setTimeout(loadStatus, 600);
+            });
+        }
+        function setAngle(val){
+            document.getElementById('cstat').innerText = 'Setting Angle...';
+            fetch('/claw?angle='+val).then(r=>r.text()).then(t=>{
+                document.getElementById('cstat').innerText = 'Status: ' + t;
+                setTimeout(loadStatus, 600);
+            });
+        }
+        function updateAngleLabel(val){ document.getElementById('sliderVal').innerText = val; }
+        
+        function scan(){
+            document.getElementById('status').innerText = 'Scanning...';
+            fetch('/scan').then(r=>r.json()).then(d=>{
+                let s = document.getElementById('ssid');
+                s.innerHTML = '<option value="">-- Select --</option>';
+                d.forEach(n=>{ s.innerHTML += '<option value="'+n+'">'+n+'</option>'; });
+                document.getElementById('status').innerText = 'Found ' + d.length + ' networks';
+            }).catch(() => document.getElementById('status').innerText = 'Scan Error');
+        }
+        function save(){
+            let s = document.getElementById('ssid').value, p = document.getElementById('pass').value;
+            if(!s) return alert('Select SSID');
+            fetch('/save', { method:'POST', body:JSON.stringify({ssid:s, pass:p}) }).then(()=>{
+                alert('Credentials saved! Rebooting...');
+            });
+        }
+        function forceAP(){ if(confirm("Switch to AP Mode and reboot?")) fetch('/switch_to_ap', { method: 'POST' }).then(() => alert('Rebooting...')); }
+        function forceWiFi(){ if(confirm("Switch to Wi-Fi Mode and reboot?")) fetch('/switch_to_wifi', { method: 'POST' }).then(() => alert('Rebooting...')); }
+        function setMode(m){
+            if(confirm("Switch to " + m.toUpperCase() + " profile and reboot?")) {
+                fetch('/switch_mode', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode:m}) }).then(() => alert('Rebooting...'));
+            }
+        }
+
+        function loadStatus(){
+            fetch('/status').then(r=>r.json()).then(d=>{
+                document.getElementById('lastcmd').innerText = d.last_cmd;
+                document.getElementById('curangle').innerText = d.angle;
+                if (document.activeElement !== document.getElementById('angleSlider')) {
+                    document.getElementById('angleSlider').value = d.angle;
+                    document.getElementById('sliderVal').innerText = d.angle;
+                }
+            });
+        }
+        setInterval(loadStatus, 3000);
+        window.onload = loadStatus;
+    </script>
+</body></html>
+)raw_html";
+
+// -------------------------------------------------------------
+// DYNAMIC ROBOT HTML PARTITIONS
 // -------------------------------------------------------------
 static const char* html_part1 = R"raw_html(<!DOCTYPE html>
 <html>
@@ -49,6 +181,7 @@ static const char* html_part1 = R"raw_html(<!DOCTYPE html>
         button { background: #3b82f6; color: white; border: none; padding: 12px 15px; border-radius: 10px; cursor: pointer; font-size: 15px; width: 100%; transition: transform 0.1s, opacity 0.2s; box-sizing: border-box; font-weight: bold; }
         button:hover { opacity: 0.9; }
         button:active { transform: scale(0.96); opacity: 0.8; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         
         select, input[type=password], input[type=number] { width: 100%; padding: 12px; box-sizing: border-box; border: 1px solid #475569; border-radius: 10px; background: #0f172a; color: white; margin-bottom: 15px; }
         .pass-container { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; }
@@ -101,6 +234,12 @@ static const char* html_part1 = R"raw_html(<!DOCTYPE html>
         <div class='grid'>
             <button class='btn-orange' onclick='forceAP()'>Force AP Mode</button>
             <button class='btn-green' onclick='forceWiFi()'>Use Saved Wi-Fi</button>
+        </div>
+        <hr style='border-color:#334155; margin: 25px 0;'>
+        <div class='text-sm' style='margin-bottom:10px;'>Hardware Profile (Reboot Required)</div>
+        <div class='grid'>
+            <button class='btn-gray' onclick='setMode("claw")'>Claw Mode</button>
+            <button class='btn-purple' disabled>✓ Robot Mode</button>
         </div>
     </div>
 )raw_html";
@@ -327,6 +466,11 @@ static const char* html_part4 = R"raw_html(
     }
     function forceWiFi(){
         if(confirm("Switch to Wi-Fi Mode and reboot?")) fetch('/switch_to_wifi', { method: 'POST' }).then(() => alert('Rebooting...'));
+    }
+    function setMode(m){
+        if(confirm("Switch to " + m.toUpperCase() + " profile and reboot?")) {
+            fetchJSON('/switch_mode', {mode: m}).then(() => alert('Rebooting...'));
+        }
     }
 
     function dragStart(id) { activeDrag = id; }
@@ -619,15 +763,18 @@ static const char* html_part4 = R"raw_html(
 </body>
 </html>
 )raw_html";
-// -------------------------------------------------------------
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_set_hdr(req, "Connection", "close"); // Free socket immediately
-    
-    // Check if Audio logic is explicitly disabled via REPL
+    httpd_resp_set_hdr(req, "Connection", "close"); 
+
+    if (is_claw_mode) {
+        httpd_resp_send(req, HTML_CLAW_UI, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     nvs_handle_t my_handle;
-    uint8_t sound_en = 1; // Default to ON if NVS read fails/is clean
+    uint8_t sound_en = 1; 
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
         nvs_get_u8(my_handle, "sound_en", &sound_en);
         nvs_close(my_handle);
@@ -652,13 +799,13 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
     }
     
     httpd_resp_send_chunk(req, html_part4, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, NULL, 0); // End Chunk Response
+    httpd_resp_send_chunk(req, NULL, 0); 
     
     return ESP_OK;
 }
 
 static esp_err_t captive_portal_redirect(httpd_req_t *req) {
-    httpd_resp_set_hdr(req, "Connection", "close"); // Free socket immediately
+    httpd_resp_set_hdr(req, "Connection", "close"); 
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
     httpd_resp_send(req, NULL, 0);
@@ -696,6 +843,9 @@ static esp_err_t get_post_json(httpd_req_t *req, cJSON **json_out) {
     return ESP_OK;
 }
 
+// -----------------------------------------------------------------
+// Common Endpoints
+// -----------------------------------------------------------------
 static esp_err_t scan_get_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Connection", "close"); 
     char* json_str = wifi_scan_networks_json();
@@ -755,6 +905,69 @@ static esp_err_t switch_wifi_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t switch_mode_post_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    cJSON *json = NULL;
+    if (get_post_json(req, &json) == ESP_OK) {
+        cJSON *mode_item = cJSON_GetObjectItem(json, "mode");
+        if (mode_item && mode_item->valuestring) {
+            nvs_handle_t my_handle;
+            if (nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
+                nvs_set_str(my_handle, "dev_mode", mode_item->valuestring);
+                nvs_commit(my_handle);
+                nvs_close(my_handle);
+            }
+            xTaskCreate(delayed_reboot_task, "reboot_task", 2048, NULL, 5, NULL);
+        }
+        cJSON_Delete(json);
+        httpd_resp_sendstr(req, "OK");
+    }
+    return ESP_OK;
+}
+
+// -----------------------------------------------------------------
+// Claw Endpoints
+// -----------------------------------------------------------------
+static esp_err_t claw_get_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    char buf[50];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char param[20];
+        if (httpd_query_key_value(buf, "cmd", param, sizeof(param)) == ESP_OK) {
+            claw_execute_command(param);
+            httpd_resp_sendstr(req, "Command Sent");
+            return ESP_OK;
+        }
+        if (httpd_query_key_value(buf, "angle", param, sizeof(param)) == ESP_OK) {
+            int angle = atoi(param);
+            claw_set_angle(angle);
+            snprintf(claw_last_command_str, sizeof(claw_last_command_str), "ANGLE: %d°", angle);
+            httpd_resp_sendstr(req, "Angle Set");
+            return ESP_OK;
+        }
+    }
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing cmd or angle parameter");
+    return ESP_FAIL;
+}
+
+static esp_err_t claw_status_get_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "last_cmd", claw_last_command_str);
+    cJSON_AddNumberToObject(root, "angle", claw_current_angle);
+    
+    char *json_str = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    
+    free(json_str);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+// -----------------------------------------------------------------
+// Robot Endpoints
+// -----------------------------------------------------------------
 static esp_err_t audio_config_post_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Connection", "close");
     cJSON *json = NULL;
@@ -907,7 +1120,6 @@ static esp_err_t sensor_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t angles_get_handler(httpd_req_t *req) {
-    // CRITICAL: Prevent socket overflow due to the 800ms frontend polling
     httpd_resp_set_hdr(req, "Connection", "close");
     
     int ang_ll, ang_hr, ang_hl, ang_lr;
@@ -978,8 +1190,6 @@ void web_server_init() {
         
         config.uri_match_fn = httpd_uri_match_wildcard;
         config.max_uri_handlers = 25; 
-        
-        // Increase maximum sockets to prevent "error in accept (23)" crashes
         config.max_open_sockets = 13;
         config.lru_purge_enable = true;                 
         
@@ -993,41 +1203,53 @@ void web_server_init() {
             httpd_register_uri_handler(server, &uri_cp2);
             httpd_register_uri_handler(server, &uri_cp3);
 
+            // Universal Endpoints
             httpd_uri_t uri_index    = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_scan     = { .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_save     = { .uri = "/save", .method = HTTP_POST, .handler = save_post_handler, .user_ctx = NULL };
             httpd_uri_t uri_switchap = { .uri = "/switch_to_ap", .method = HTTP_POST, .handler = switch_ap_post_handler, .user_ctx = NULL };
             httpd_uri_t uri_switchwi = { .uri = "/switch_to_wifi", .method = HTTP_POST, .handler = switch_wifi_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_servo    = { .uri = "/servo", .method = HTTP_POST, .handler = servo_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_act      = { .uri = "/action", .method = HTTP_POST, .handler = action_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_cal      = { .uri = "/calibrate", .method = HTTP_POST, .handler = calibrate_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_caljson  = { .uri = "/calibrations_json", .method = HTTP_GET, .handler = calibrations_json_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_dlcal    = { .uri = "/download_cal", .method = HTTP_GET, .handler = download_cal_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_angs     = { .uri = "/angles", .method = HTTP_GET, .handler = angles_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_sensor   = { .uri = "/sensor", .method = HTTP_POST, .handler = sensor_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_resetcal = { .uri = "/reset_cal", .method = HTTP_POST, .handler = reset_cal_post_handler, .user_ctx = NULL };
+            httpd_uri_t uri_swmode   = { .uri = "/switch_mode", .method = HTTP_POST, .handler = switch_mode_post_handler, .user_ctx = NULL };
             httpd_uri_t uri_favicon  = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_audcfg   = { .uri = "/audio_config", .method = HTTP_POST, .handler = audio_config_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_audply   = { .uri = "/audio_play", .method = HTTP_POST, .handler = audio_play_post_handler, .user_ctx = NULL };
-            httpd_uri_t uri_audstp   = { .uri = "/audio_stop", .method = HTTP_POST, .handler = audio_stop_post_handler, .user_ctx = NULL };
-            
+
             httpd_register_uri_handler(server, &uri_index);
             httpd_register_uri_handler(server, &uri_scan);
             httpd_register_uri_handler(server, &uri_save);
             httpd_register_uri_handler(server, &uri_switchap);
             httpd_register_uri_handler(server, &uri_switchwi);
-            httpd_register_uri_handler(server, &uri_servo);
-            httpd_register_uri_handler(server, &uri_act);
-            httpd_register_uri_handler(server, &uri_cal);
-            httpd_register_uri_handler(server, &uri_caljson);
-            httpd_register_uri_handler(server, &uri_dlcal);
-            httpd_register_uri_handler(server, &uri_angs);
-            httpd_register_uri_handler(server, &uri_sensor);
-            httpd_register_uri_handler(server, &uri_resetcal);
+            httpd_register_uri_handler(server, &uri_swmode);
             httpd_register_uri_handler(server, &uri_favicon);
-            httpd_register_uri_handler(server, &uri_audcfg);
-            httpd_register_uri_handler(server, &uri_audply);
-            httpd_register_uri_handler(server, &uri_audstp);
+
+            if (is_claw_mode) {
+                httpd_uri_t uri_claw   = { .uri = "/claw",   .method = HTTP_GET, .handler = claw_get_handler,   .user_ctx = NULL };
+                httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET, .handler = claw_status_get_handler, .user_ctx = NULL };
+                httpd_register_uri_handler(server, &uri_claw);
+                httpd_register_uri_handler(server, &uri_status);
+            } else {
+                httpd_uri_t uri_servo    = { .uri = "/servo", .method = HTTP_POST, .handler = servo_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_act      = { .uri = "/action", .method = HTTP_POST, .handler = action_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_cal      = { .uri = "/calibrate", .method = HTTP_POST, .handler = calibrate_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_caljson  = { .uri = "/calibrations_json", .method = HTTP_GET, .handler = calibrations_json_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_dlcal    = { .uri = "/download_cal", .method = HTTP_GET, .handler = download_cal_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_angs     = { .uri = "/angles", .method = HTTP_GET, .handler = angles_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_sensor   = { .uri = "/sensor", .method = HTTP_POST, .handler = sensor_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_resetcal = { .uri = "/reset_cal", .method = HTTP_POST, .handler = reset_cal_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_audcfg   = { .uri = "/audio_config", .method = HTTP_POST, .handler = audio_config_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_audply   = { .uri = "/audio_play", .method = HTTP_POST, .handler = audio_play_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_audstp   = { .uri = "/audio_stop", .method = HTTP_POST, .handler = audio_stop_post_handler, .user_ctx = NULL };
+                
+                httpd_register_uri_handler(server, &uri_servo);
+                httpd_register_uri_handler(server, &uri_act);
+                httpd_register_uri_handler(server, &uri_cal);
+                httpd_register_uri_handler(server, &uri_caljson);
+                httpd_register_uri_handler(server, &uri_dlcal);
+                httpd_register_uri_handler(server, &uri_angs);
+                httpd_register_uri_handler(server, &uri_sensor);
+                httpd_register_uri_handler(server, &uri_resetcal);
+                httpd_register_uri_handler(server, &uri_audcfg);
+                httpd_register_uri_handler(server, &uri_audply);
+                httpd_register_uri_handler(server, &uri_audstp);
+            }
             
             httpd_uri_t uri_fallback = { .uri = "/*", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
             httpd_register_uri_handler(server, &uri_fallback);
