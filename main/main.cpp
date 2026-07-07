@@ -184,6 +184,11 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
+    // --- Suppress Noisy Internal Framework Warnings ---
+    esp_log_level_set("wifi", ESP_LOG_ERROR);    // Hides "no need to send deauth"
+    esp_log_level_set("cam_hal", ESP_LOG_NONE);  // Hides "NO-SOI - JPEG start marker missing"
+    // --------------------------------------------------
+
     // 2. Setup Base Network Event Loop
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
