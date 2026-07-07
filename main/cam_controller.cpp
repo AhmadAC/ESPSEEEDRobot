@@ -95,13 +95,17 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingD
             static uint8_t last_dpad = 8;
             
             if (dpad != last_dpad) {
-                // Left D-Pad triggers "Open"
-                if (dpad == 6 || dpad == 5 || dpad == 7) { 
-                    claw_execute_command("open");
-                } 
-                // Right D-Pad triggers "Close"
-                else if (dpad == 2 || dpad == 1 || dpad == 3) { 
-                    claw_execute_command("close");
+                // Check if the Right D-Pad (2=Right, 1=Up-Right, 3=Down-Right) was just pressed
+                bool is_right = (dpad == 2 || dpad == 1 || dpad == 3);
+                bool was_right = (last_dpad == 2 || last_dpad == 1 || last_dpad == 3);
+                
+                if (is_right && !was_right) {
+                    // Toggle Claw open/close state based on its current position
+                    if (claw_current_angle > 90) {
+                        claw_execute_command("close");
+                    } else {
+                        claw_execute_command("open");
+                    }
                 }
                 last_dpad = dpad;
             }

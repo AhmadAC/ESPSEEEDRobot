@@ -1,3 +1,4 @@
+// main\main.cpp
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -38,6 +39,7 @@ static void console_read_task(void *pvParameter) {
     ESP_LOGI("REPL", "  reset      - Factory Reset NVS (Restores Settings)");
     ESP_LOGI("REPL", "  sound      - Enable Audio UI");
     ESP_LOGI("REPL", "  no sound   - Disable & Hide Audio UI");
+    ESP_LOGI("REPL", "  connect    - Pair with PyController via ESP-NOW");
     ESP_LOGI("REPL", "  0-180      - Set Claw Angle (Claw Mode)");
     ESP_LOGI("REPL", "  open/close/half - Toggle Claw (Claw Mode)");
     ESP_LOGI("REPL", "  (Ctrl+C)   - Stop Motors / Relax Claw");
@@ -159,6 +161,13 @@ static void console_read_task(void *pvParameter) {
                             }
                             vTaskDelay(pdMS_TO_TICKS(500));
                             esp_restart();
+                        } else if (strcmp(cmd, "connect") == 0) {
+                            ESP_LOGW("REPL", "Command 'connect' received. Initiating ESP-NOW pairing...");
+                            if (is_claw_mode) {
+                                cam_espnow_pair_claw();
+                            } else {
+                                ESP_LOGW("REPL", "ESP-NOW pairing via REPL is configured for Claw/Cam Mode.");
+                            }
                         } else if (is_claw_mode) {
                             // Check if the command is purely numeric
                             bool is_numeric = true;
