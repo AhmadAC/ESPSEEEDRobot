@@ -205,10 +205,10 @@ extern "C" void app_main(void) {
 
     // 4. Boot Modular Components
     if (is_claw_mode) {
-        ESP_LOGI(TAG, "Booting Device Profile: CLAW");
+        ESP_LOGI(TAG, "Booting Device Profile: CLAW (with Camera support)");
         claw_controller_init();
-        ESP_LOGI(TAG, "Booting in WI-FI Mode.");
         wifi_manager_init();
+        cam_controller_init(); 
         web_server_init();
     } else if (is_cam_mode) {
         ESP_LOGI(TAG, "Booting Device Profile: CAM");

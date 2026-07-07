@@ -236,6 +236,14 @@ const char HTML_CLAW_UI[] = R"raw_html(
             
             <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
         </div>
+        
+        <div class="card" id="camCard">
+            <h2>Live Camera</h2>
+            <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative;">
+                <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto;">
+            </div>
+            <button id="camToggleBtn" class="btn-blue" onclick="toggleCamera()">Turn Camera ON</button>
+        </div>
 
         <div class="card">
             <h2>Wi-Fi Settings</h2>
@@ -280,6 +288,25 @@ const char HTML_CLAW_UI[] = R"raw_html(
             });
         }
         function updateAngleLabel(val){ document.getElementById('sliderVal').innerText = val; }
+        
+        let camActive = false;
+        function toggleCamera() {
+            camActive = !camActive;
+            const container = document.getElementById('streamContainer');
+            const img = document.getElementById('streamImg');
+            const btn = document.getElementById('camToggleBtn');
+            if (camActive) {
+                img.src = 'http://' + window.location.hostname + ':81/';
+                container.style.display = 'block';
+                btn.innerText = 'Turn Camera OFF';
+                btn.className = 'btn-red';
+            } else {
+                img.src = '';
+                container.style.display = 'none';
+                btn.innerText = 'Turn Camera ON';
+                btn.className = 'btn-blue';
+            }
+        }
         
         function scan(){
             document.getElementById('status').innerText = 'Scanning...';
