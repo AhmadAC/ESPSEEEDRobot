@@ -40,8 +40,13 @@ static void console_read_task(void *pvParameter) {
     ESP_LOGI("REPL", "  sound      - Enable Audio UI");
     ESP_LOGI("REPL", "  no sound   - Disable & Hide Audio UI");
     ESP_LOGI("REPL", "  connect    - Pair with PyController via ESP-NOW");
-    ESP_LOGI("REPL", "  0-180      - Set Claw Angle (Claw Mode)");
-    ESP_LOGI("REPL", "  open/close/half - Toggle Claw (Claw Mode)");
+    ESP_LOGI("REPL", "  (Claw Mode)  0-180 / open / close / half");
+    ESP_LOGI("REPL", "  (Robot Mode) sit, stand, forward, backward, stop...");
+    ESP_LOGI("REPL", "  (Robot Mode) ll/lr/hl/hr <angle> - e.g. 'll 90'");
+    ESP_LOGI("REPL", "  (Robot Mode) sync on / sync off - Link pair legs");
+    ESP_LOGI("REPL", "  (Robot Mode) all <angle> - Set all legs to angle");
+    ESP_LOGI("REPL", "  (Robot Mode) sensor on / sensor off");
+    ESP_LOGI("REPL", "  (Robot Mode) play <sound_name> - e.g. 'play dog_bark'");
     ESP_LOGI("REPL", "  (Ctrl+C)   - Stop Motors / Relax Claw");
     ESP_LOGI("REPL", "  (Ctrl+D)   - Soft Reboot");
     ESP_LOGI("REPL", "==================================================");
@@ -53,6 +58,7 @@ static void console_read_task(void *pvParameter) {
     uint8_t buf[64];
     char cmd[64];
     int cmd_idx = 0;
+    static bool repl_sync = false;
     
     while (1) {
         int len = read(fd, buf, sizeof(buf));
@@ -169,7 +175,7 @@ static void console_read_task(void *pvParameter) {
                                 ESP_LOGW("REPL", "ESP-NOW pairing via REPL is configured for Claw/Cam Mode.");
                             }
                         } else if (is_claw_mode) {
-                            // Check if the command is purely numeric
+                            // Route the Claw actions dynamically
                             bool is_numeric = true;
                             int cmd_len = strlen(cmd);
                             for (int j = 0; j < cmd_len; j++) {
@@ -178,8 +184,6 @@ static void console_read_task(void *pvParameter) {
                                     break;
                                 }
                             }
-                            
-                            // Route the Claw actions dynamically
                             if (strncmp(cmd, "angle ", 6) == 0) {
                                 int ang = atoi(cmd + 6);
                                 claw_set_angle(ang);
@@ -189,7 +193,43 @@ static void console_read_task(void *pvParameter) {
                             } else if (strcmp(cmd, "half") == 0) {
                                 claw_execute_command("half_open");
                             } else {
-                                claw_execute_command(cmd); // "open", "close", "half_open", etc.
+                                claw_execute_command(cmd); 
+                            }
+                        } else if (!is_cam_mode) {
+                            // Robot Mode specific commands
+                            int ang = 0;
+                            if (strcmp(cmd, "sit") == 0 || strcmp(cmd, "stand") == 0 || strcmp(cmd, "forward") == 0 ||
+                                strcmp(cmd, "backward") == 0 || strcmp(cmd, "step_forward") == 0 || strcmp(cmd, "step_backward") == 0 ||
+                                strcmp(cmd, "stop") == 0 || strcmp(cmd, "crawl") == 0 || strcmp(cmd, "left_wave") == 0 || 
+                                strcmp(cmd, "right_wave") == 0 || strcmp(cmd, "back_left_wave") == 0 || strcmp(cmd, "back_right_wave") == 0 ||
+                                strcmp(cmd, "stretch_down") == 0 || strcmp(cmd, "stretch_back") == 0 || strcmp(cmd, "leap_forward") == 0) {
+                                
+                                ESP_LOGI("REPL", "Running Robot Action: %s", cmd);
+                                servo_set_action(cmd);
+                            }
+                            else if (sscanf(cmd, "ll %d", &ang) == 1) { servo_set_target("low_left", ang); if(repl_sync) servo_set_target("low_right", ang); ESP_LOGI("REPL", "Low Left -> %d", ang); }
+                            else if (sscanf(cmd, "lr %d", &ang) == 1) { servo_set_target("low_right", ang); if(repl_sync) servo_set_target("low_left", ang); ESP_LOGI("REPL", "Low Right -> %d", ang); }
+                            else if (sscanf(cmd, "hl %d", &ang) == 1) { servo_set_target("high_left", ang); if(repl_sync) servo_set_target("high_right", ang); ESP_LOGI("REPL", "High Left -> %d", ang); }
+                            else if (sscanf(cmd, "hr %d", &ang) == 1) { servo_set_target("high_right", ang); if(repl_sync) servo_set_target("high_left", ang); ESP_LOGI("REPL", "High Right -> %d", ang); }
+                            else if (sscanf(cmd, "all %d", &ang) == 1) { servo_set_target("all", ang); ESP_LOGI("REPL", "All Legs -> %d", ang); }
+                            else if (strcmp(cmd, "sync on") == 0) { repl_sync = true; ESP_LOGI("REPL", "Leg Sync ENABLED"); }
+                            else if (strcmp(cmd, "sync off") == 0) { repl_sync = false; ESP_LOGI("REPL", "Leg Sync DISABLED"); }
+                            else if (strncmp(cmd, "play ", 5) == 0) {
+                                char sound_name[32] = {0};
+                                sscanf(cmd + 5, "%31s", sound_name);
+                                audio_play(sound_name);
+                                ESP_LOGI("REPL", "Playing sound: %s", sound_name);
+                            }
+                            else if (strcmp(cmd, "sensor on") == 0) {
+                                sensor_set_enabled(true);
+                                ESP_LOGI("REPL", "Ultrasonic Sensor ENABLED");
+                            }
+                            else if (strcmp(cmd, "sensor off") == 0) {
+                                sensor_set_enabled(false);
+                                ESP_LOGI("REPL", "Ultrasonic Sensor DISABLED");
+                            }
+                            else {
+                                ESP_LOGW("REPL", "Unknown Robot Command: %s", cmd);
                             }
                         }
                         cmd_idx = 0;

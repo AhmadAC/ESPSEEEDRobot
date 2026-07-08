@@ -79,14 +79,16 @@ const char HTML_CAM_APP[] = R"raw_html(
     .container { width: 100%; max-width: 600px; }
     .card { background: var(--card); padding: 25px; border-radius: 20px; border: 1px solid #334155; text-align: center; margin-top: 15px; }
     h1 { color: #00adb5; margin-bottom: 20px; }
-    .stream-container { width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 20px; position: relative; min-height: 200px; }
-    img { display: block; width: 100%; height: auto; }
+    .stream-container { width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 20px; position: relative; min-height: 200px; display: flex; align-items: center; justify-content: center; }
+    img { display: block; width: 100%; height: auto; transition: transform 0.2s; }
     button { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; transition: transform 0.1s; }
     button:active { transform: scale(0.96); opacity: 0.9; }
     button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     .btn-blue { background: #3b82f6; margin-top:10px; }
     .btn-gray { background: #475569; }
     .btn-purple { background: #8b5cf6; }
+    .btn-orange { background: #f59e0b; }
+    .btn-green { background: #10b981; }
     .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; }
     .status-text { margin-top: 10px; color: #aaaaaa; font-size: 14px; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
@@ -99,7 +101,11 @@ const char HTML_CAM_APP[] = R"raw_html(
             <div class="stream-container">
                 <img id="streamImg" alt="Live Stream">
             </div>
-            <button id="snapBtn" class="btn-blue" onclick="takeSnapshot()">Save Snapshot</button>
+            
+            <div class="grid-2">
+                <button id="snapBtn" class="btn-green" onclick="takeSnapshot()">Save HD Picture</button>
+                <button class="btn-orange" onclick="rotateCamera()">Rotate 90&deg;</button>
+            </div>
             <div id="status" class="status-text">Streaming live...</div>
             
             <button class="btn-gray" style="margin-top:25px; background:#0f172a; border:1px solid #475569;" onclick="location.href='/setup'">Go to Wi-Fi Setup</button>
@@ -120,6 +126,17 @@ const char HTML_CAM_APP[] = R"raw_html(
     <script>
         document.getElementById('streamImg').src = 'http://' + window.location.hostname + ':81/';
 
+        let camRotation = 0;
+        function rotateCamera() {
+            camRotation = (camRotation + 90) % 360;
+            const img = document.getElementById('streamImg');
+            if (camRotation % 180 !== 0) {
+                img.style.transform = `rotate(${camRotation}deg) scale(0.75)`;
+            } else {
+                img.style.transform = `rotate(${camRotation}deg) scale(1)`;
+            }
+        }
+
         function takeSnapshot() {
             const btn = document.getElementById('snapBtn');
             const status = document.getElementById('status');
@@ -132,21 +149,29 @@ const char HTML_CAM_APP[] = R"raw_html(
                     return response.blob();
                 })
                 .then(blob => {
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.style.display = 'none';
-                    a.href = url;
-                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                    a.download = `snapshot_${timestamp}.jpg`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                    status.innerText = "Snapshot saved!";
-                    btn.disabled = false;
-                    setTimeout(() => {
-                        status.innerText = "Streaming live...";
-                    }, 3000);
+                    if (camRotation === 0) {
+                        downloadBlob(blob);
+                    } else {
+                        const img = new Image();
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            if (camRotation % 180 !== 0) {
+                                canvas.width = img.naturalHeight;
+                                canvas.height = img.naturalWidth;
+                            } else {
+                                canvas.width = img.naturalWidth;
+                                canvas.height = img.naturalHeight;
+                            }
+                            ctx.translate(canvas.width/2, canvas.height/2);
+                            ctx.rotate(camRotation * Math.PI / 180);
+                            ctx.drawImage(img, -img.naturalWidth/2, -img.naturalHeight/2);
+                            canvas.toBlob(rotatedBlob => {
+                                downloadBlob(rotatedBlob);
+                            }, 'image/jpeg', 0.95);
+                        };
+                        img.src = URL.createObjectURL(blob);
+                    }
                 })
                 .catch(err => {
                     console.error(err);
@@ -155,6 +180,23 @@ const char HTML_CAM_APP[] = R"raw_html(
                     btn.disabled = false;
                 });
         }
+        
+        function downloadBlob(blob) {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `snapshot_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            const status = document.getElementById('status');
+            status.innerText = "Snapshot saved!";
+            document.getElementById('snapBtn').disabled = false;
+            setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
+        }
+
         function forceAP(){ if(confirm("Switch to AP Mode and reboot?")) fetch('/switch_to_ap', { method: 'POST' }).then(() => alert('Rebooting...')); }
         function forceWiFi(){ if(confirm("Switch to Wi-Fi Mode and reboot?")) fetch('/switch_to_wifi', { method: 'POST' }).then(() => alert('Rebooting...')); }
         function setMode(m){
@@ -187,6 +229,7 @@ const char HTML_CLAW_UI[] = R"raw_html(
     .btn-blue { background: #3b82f6; }
     .btn-purple { background: #8b5cf6; }
     .btn-gray { background: #475569; }
+    .btn-orange { background: #f59e0b; }
     .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; margin-bottom:15px; }
     .text-sm { font-size: 0.85rem; color: #94a3b8; margin-bottom:10px; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
@@ -219,11 +262,14 @@ const char HTML_CLAW_UI[] = R"raw_html(
         
         <div class="card" id="camCard">
             <h2>Live Camera</h2>
-            <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative;">
-                <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto;">
+            <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative; flex-direction: column; align-items: center; justify-content: center;">
+                <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto; transition: transform 0.2s;">
             </div>
             <div id="camControls" style="display:none; margin-bottom: 15px;">
-                <button id="snapBtn" class="btn-green" onclick="takeSnapshot()">Save Snapshot</button>
+                <div class="grid-2">
+                    <button id="snapBtn" class="btn-green" onclick="takeSnapshot()">Save HD Picture</button>
+                    <button class="btn-orange" onclick="rotateCamera()">Rotate 90&deg;</button>
+                </div>
                 <div id="camStatus" class="text-sm" style="margin-top: 10px;">Streaming live...</div>
             </div>
             <button id="camToggleBtn" class="btn-blue" onclick="toggleCamera()">Turn Camera ON</button>
@@ -282,6 +328,18 @@ const char HTML_CLAW_UI[] = R"raw_html(
         }
 
         let camActive = false;
+        let camRotation = 0;
+        
+        function rotateCamera() {
+            camRotation = (camRotation + 90) % 360;
+            const img = document.getElementById('streamImg');
+            if (camRotation % 180 !== 0) {
+                img.style.transform = `rotate(${camRotation}deg) scale(0.75)`;
+            } else {
+                img.style.transform = `rotate(${camRotation}deg) scale(1)`;
+            }
+        }
+        
         function toggleCamera() {
             camActive = !camActive;
             const container = document.getElementById('streamContainer');
@@ -290,7 +348,7 @@ const char HTML_CLAW_UI[] = R"raw_html(
             const ctrl = document.getElementById('camControls');
             if (camActive) {
                 img.src = 'http://' + window.location.hostname + ':81/';
-                container.style.display = 'block';
+                container.style.display = 'flex';
                 ctrl.style.display = 'block';
                 btn.innerText = 'Turn Camera OFF';
                 btn.className = 'btn-red';
@@ -310,24 +368,34 @@ const char HTML_CLAW_UI[] = R"raw_html(
             status.innerText = "Capturing high-resolution image...";
 
             fetch('/capture')
-                .then(response => {
-                    if (!response.ok) throw new Error('Capture failed');
-                    return response.blob();
+                .then(r => {
+                    if(!r.ok) throw new Error('Capture failed');
+                    return r.blob();
                 })
                 .then(blob => {
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.style.display = 'none';
-                    a.href = url;
-                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                    a.download = `snapshot_${timestamp}.jpg`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                    status.innerText = "Snapshot saved!";
-                    btn.disabled = false;
-                    setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
+                    if (camRotation === 0) {
+                        downloadBlob(blob);
+                    } else {
+                        const img = new Image();
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            if (camRotation % 180 !== 0) {
+                                canvas.width = img.naturalHeight;
+                                canvas.height = img.naturalWidth;
+                            } else {
+                                canvas.width = img.naturalWidth;
+                                canvas.height = img.naturalHeight;
+                            }
+                            ctx.translate(canvas.width/2, canvas.height/2);
+                            ctx.rotate(camRotation * Math.PI / 180);
+                            ctx.drawImage(img, -img.naturalWidth/2, -img.naturalHeight/2);
+                            canvas.toBlob(rotatedBlob => {
+                                downloadBlob(rotatedBlob);
+                            }, 'image/jpeg', 0.95);
+                        };
+                        img.src = URL.createObjectURL(blob);
+                    }
                 })
                 .catch(err => {
                     console.error(err);
@@ -335,6 +403,22 @@ const char HTML_CLAW_UI[] = R"raw_html(
                     alert("Capture Error! Check Serial Monitor.");
                     btn.disabled = false;
                 });
+        }
+        
+        function downloadBlob(blob) {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `snapshot_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            const status = document.getElementById('camStatus');
+            status.innerText = "Snapshot saved!";
+            document.getElementById('snapBtn').disabled = false;
+            setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
         }
         
         function scan(){
@@ -474,13 +558,13 @@ const char html_cam_card[] = R"raw_html(
     <!-- CAMERA CARD -->
     <div class='card' id='robot_cam_card'>
         <h2>Live Camera</h2>
-        <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative;">
-            <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto;">
+        <div class="stream-container" id="streamContainer" style="display:none; width: 100%; border-radius: 8px; overflow: hidden; background-color: #000; margin-bottom: 15px; min-height: 200px; position: relative; display: flex; align-items: center; justify-content: center;">
+            <img id="streamImg" alt="Live Stream" style="display: block; width: 100%; height: auto; transition: transform 0.2s;">
         </div>
         <div id="camControls" style="display:none; margin-bottom: 15px;">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                 <button id="snapBtn" class="btn-green" onclick="takeSnapshot()">Save HD Picture</button>
-                <button class="btn-orange" onclick="flipCamera()">Flip Video</button>
+                <button class="btn-orange" onclick="rotateCamera()">Rotate 90&deg;</button>
             </div>
             <div id="camStatus" class="text-sm" style="margin-top: 10px; text-align:center;">Streaming live...</div>
         </div>
@@ -698,6 +782,18 @@ const char html_part4[] = R"raw_html(
     const legMap = { 'low_left': 'll', 'high_right': 'hr', 'high_left': 'hl', 'low_right': 'lr' };
 
     let camActive = false;
+    let camRotation = 0;
+    
+    function rotateCamera() {
+        camRotation = (camRotation + 90) % 360;
+        const img = document.getElementById('streamImg');
+        if (camRotation % 180 !== 0) {
+            img.style.transform = `rotate(${camRotation}deg) scale(0.75)`;
+        } else {
+            img.style.transform = `rotate(${camRotation}deg) scale(1)`;
+        }
+    }
+    
     function toggleCamera() {
         camActive = !camActive;
         const container = document.getElementById('streamContainer');
@@ -706,7 +802,7 @@ const char html_part4[] = R"raw_html(
         const ctrl = document.getElementById('camControls');
         if (camActive) {
             img.src = 'http://' + window.location.hostname + ':81/';
-            container.style.display = 'block';
+            container.style.display = 'flex';
             ctrl.style.display = 'block';
             btn.innerText = 'Turn Camera OFF';
             btn.className = 'btn-red';
@@ -719,12 +815,6 @@ const char html_part4[] = R"raw_html(
         }
     }
     
-    function flipCamera() {
-        fetch('/cam_flip', {method: 'POST'}).then(() => {
-            console.log("Camera flipped");
-        });
-    }
-
     function takeSnapshot() {
         const btn = document.getElementById('snapBtn');
         const status = document.getElementById('camStatus');
@@ -732,24 +822,34 @@ const char html_part4[] = R"raw_html(
         status.innerText = "Capturing high-resolution image...";
 
         fetch('/capture')
-            .then(response => {
-                if (!response.ok) throw new Error('Capture failed');
-                return response.blob();
+            .then(r => {
+                if(!r.ok) throw new Error('Capture failed');
+                return r.blob();
             })
             .then(blob => {
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                a.download = `snapshot_${timestamp}.jpg`;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
-                status.innerText = "Snapshot saved!";
-                btn.disabled = false;
-                setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
+                if (camRotation === 0) {
+                    downloadBlob(blob);
+                } else {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        if (camRotation % 180 !== 0) {
+                            canvas.width = img.naturalHeight;
+                            canvas.height = img.naturalWidth;
+                        } else {
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                        }
+                        ctx.translate(canvas.width/2, canvas.height/2);
+                        ctx.rotate(camRotation * Math.PI / 180);
+                        ctx.drawImage(img, -img.naturalWidth/2, -img.naturalHeight/2);
+                        canvas.toBlob(rotatedBlob => {
+                            downloadBlob(rotatedBlob);
+                        }, 'image/jpeg', 0.95);
+                    };
+                    img.src = URL.createObjectURL(blob);
+                }
             })
             .catch(err => {
                 console.error(err);
@@ -757,6 +857,22 @@ const char html_part4[] = R"raw_html(
                 alert("Capture Error! Check Serial Monitor.");
                 btn.disabled = false;
             });
+    }
+    
+    function downloadBlob(blob) {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = `snapshot_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        const status = document.getElementById('camStatus');
+        status.innerText = "Snapshot saved!";
+        document.getElementById('snapBtn').disabled = false;
+        setTimeout(() => { status.innerText = "Streaming live..."; }, 3000);
     }
 
     function fetchJSON(url, bodyData) {
