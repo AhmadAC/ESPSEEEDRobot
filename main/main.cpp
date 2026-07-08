@@ -46,7 +46,7 @@ static void console_read_task(void *pvParameter) {
     ESP_LOGI("REPL", "  (Robot Mode) sync on / sync off - Link pair legs");
     ESP_LOGI("REPL", "  (Robot Mode) all <angle> - Set all legs to angle");
     ESP_LOGI("REPL", "  (Robot Mode) sensor on / sensor off");
-    ESP_LOGI("REPL", "  (Robot Mode) play <sound_name> - e.g. 'play dog_bark'");
+    ESP_LOGI("REPL", "  (Robot Mode) play <sound_name> - e.g. 'play dog_bark' or 'play record_3s'");
     ESP_LOGI("REPL", "  (Ctrl+C)   - Stop Motors / Relax Claw");
     ESP_LOGI("REPL", "  (Ctrl+D)   - Soft Reboot");
     ESP_LOGI("REPL", "==================================================");

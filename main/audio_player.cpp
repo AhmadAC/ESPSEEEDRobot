@@ -1,20 +1,28 @@
+// main\audio_player.cpp
 #include "audio_player.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/i2s_std.h"
+#include "driver/i2s_pdm.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include <string.h>
 
 static const char *TAG = "AUDIO";
 
-// Pinout mapping for Seeed XIAO ESP32S3
+// Pinout mapping for Seeed XIAO ESP32S3 external I2S Amplifier
 #define I2S_LRC_PIN  GPIO_NUM_7 // D8
 #define I2S_BCLK_PIN GPIO_NUM_8 // D9
 #define I2S_DIN_PIN  GPIO_NUM_9 // D10
 
+// Pinout mapping for Seeed XIAO ESP32S3 Sense INTERNAL PDM Microphone
+#define I2S_MIC_CLK_PIN GPIO_NUM_42
+#define I2S_MIC_DAT_PIN GPIO_NUM_41
+
 static i2s_chan_handle_t tx_chan;
+static i2s_chan_handle_t rx_chan;
 static int32_t current_volume = 50; // 0-100 Default volume
 static QueueHandle_t audio_queue;
 static volatile bool audio_stop_requested = false; // Flag to instantly break playback loops
@@ -40,6 +48,105 @@ static void audio_task(void *pvParameter) {
         // Wait until a sound play request is received in the queue
         if (xQueueReceive(audio_queue, &sound_req, portMAX_DELAY)) {
             
+            // -------------------------------------------------------------
+            // RECORD 3 SECONDS FROM PDM MIC & PLAY IT BACK
+            // -------------------------------------------------------------
+            if (strcmp(sound_req, "record_3s") == 0) {
+                ESP_LOGI(TAG, "Starting 3-second recording from internal PDM mic...");
+                uint32_t sample_rate = 16000;
+                uint16_t channels = 1;
+                uint16_t bit_depth = 16;
+                size_t data_size = sample_rate * (bit_depth / 8) * channels * 3; // 96,000 bytes
+                
+                uint8_t* record_buffer = NULL;
+#ifdef CONFIG_SPIRAM
+                record_buffer = (uint8_t*) heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+                if (!record_buffer) {
+                    record_buffer = (uint8_t*) malloc(data_size);
+                }
+                
+                if (record_buffer) {
+                    // Drain old data to avoid playing back history buffer noise
+                    i2s_channel_disable(rx_chan);
+                    i2s_channel_enable(rx_chan);
+                    
+                    ESP_LOGI(TAG, "Recording...");
+                    audio_stop_requested = false;
+                    
+                    size_t chunk = sample_rate * (bit_depth / 8) * channels / 10; // 0.1 seconds per chunk
+                    size_t total_read = 0;
+                    
+                    // Allow UI "Stop Sound" button to interrupt recording midway through
+                    while (total_read < data_size && !audio_stop_requested) {
+                        size_t to_read = (data_size - total_read > chunk) ? chunk : (data_size - total_read);
+                        size_t bytes_read = 0;
+                        i2s_channel_read(rx_chan, record_buffer + total_read, to_read, &bytes_read, portMAX_DELAY);
+                        total_read += bytes_read;
+                    }
+                    
+                    if (audio_stop_requested) {
+                        ESP_LOGI(TAG, "Recording interrupted by STOP request.");
+                    } else if (total_read > 0) {
+                        ESP_LOGI(TAG, "Recording complete (%lu bytes). Playing back...", (unsigned long)total_read);
+                        
+                        i2s_channel_disable(tx_chan);
+                        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+                        i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg);
+                        i2s_std_slot_config_t slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+                            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO
+                        );
+                        i2s_channel_reconfig_std_slot(tx_chan, &slot_cfg);
+                        i2s_channel_enable(tx_chan);
+                        
+                        int16_t* pcm_samples = (int16_t*)record_buffer;
+                        size_t num_samples = total_read / 2;
+                        
+                        const float HARDWARE_POWER_LIMIT = 0.60f; 
+                        const float MIC_GAIN = 4.0f; // Boost the raw mic capture via software gain multiplier
+                        float vol_mult = ((float)current_volume / 100.0f) * HARDWARE_POWER_LIMIT * MIC_GAIN;
+                        
+                        const size_t CHUNK_SAMPLES = 512; 
+                        int16_t out_buffer[CHUNK_SAMPLES];
+                        size_t bytes_written;
+                        
+                        for (size_t i = 0; i < num_samples; i += CHUNK_SAMPLES) {
+                            if (audio_stop_requested) break;
+                            size_t chunk_size = (num_samples - i < CHUNK_SAMPLES) ? (num_samples - i) : CHUNK_SAMPLES;
+                            
+                            for (size_t j = 0; j < chunk_size; j++) {
+                                if (current_volume == 0) {
+                                    out_buffer[j] = 0;
+                                } else {
+                                    // Calculate boost and clamp within physical 16-bit limits
+                                    int32_t val = (int32_t)(pcm_samples[i + j] * vol_mult);
+                                    if (val > 32767) val = 32767;
+                                    if (val < -32768) val = -32768;
+                                    out_buffer[j] = (int16_t)val;
+                                }
+                            }
+                            i2s_channel_write(tx_chan, out_buffer, chunk_size * 2, &bytes_written, portMAX_DELAY);
+                        }
+                        
+                        if (audio_stop_requested) {
+                            i2s_channel_disable(tx_chan);
+                            i2s_channel_enable(tx_chan);
+                            ESP_LOGI(TAG, "Playback interrupted by STOP request.");
+                        } else {
+                            i2s_channel_write(tx_chan, NULL, 0, &bytes_written, portMAX_DELAY);
+                            ESP_LOGI(TAG, "Playback finished.");
+                        }
+                    }
+                    free(record_buffer);
+                } else {
+                    ESP_LOGE(TAG, "Failed to allocate memory for recording.");
+                }
+                continue; // Skip the WAV file logic below
+            }
+
+            // -------------------------------------------------------------
+            // PLAY STATIC WAV FILE
+            // -------------------------------------------------------------
             const uint8_t* wav_start = NULL;
             const uint8_t* wav_end = NULL;
             
@@ -167,6 +274,7 @@ void audio_player_init() {
     load_audio_nvs();
     audio_queue = xQueueCreate(5, sizeof(char) * 32);
 
+    // Initialize External I2S TX Amplifier
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, NULL));
 
@@ -188,10 +296,33 @@ void audio_player_init() {
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
 
+    // Initialize Internal PDM RX channel for Microphone
+    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&rx_chan_cfg, NULL, &rx_chan));
+
+    i2s_pdm_rx_config_t pdm_rx_cfg = {
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(16000), // 16 kHz sample rate
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .clk = I2S_MIC_CLK_PIN,
+            .din = I2S_MIC_DAT_PIN,
+            .invert_flags = {
+                .clk_inv = false,
+            },
+        },
+    };
+    
+    // Explicitly target left slot (usually tied to GND on breakouts and Sense shields)
+    pdm_rx_cfg.slot_cfg.slot_mask = I2S_PDM_SLOT_LEFT;
+    
+    ESP_ERROR_CHECK(i2s_channel_init_pdm_rx_mode(rx_chan, &pdm_rx_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
+
     // Run audio handling strictly on Core 1 to avoid interrupting Servo PWM
     xTaskCreatePinnedToCore(audio_task, "audio_task", 4096, NULL, 4, NULL, 1);
     
-    ESP_LOGI(TAG, "I2S Audio Player Initialized. Pins: BCLK=%d, LRC=%d, DIN=%d", I2S_BCLK_PIN, I2S_LRC_PIN, I2S_DIN_PIN);
+    ESP_LOGI(TAG, "I2S Audio TX initialized on pins: BCLK=%d, LRC=%d, DIN=%d", I2S_BCLK_PIN, I2S_LRC_PIN, I2S_DIN_PIN);
+    ESP_LOGI(TAG, "I2S PDM RX initialized on pins: CLK=%d, DAT=%d", I2S_MIC_CLK_PIN, I2S_MIC_DAT_PIN);
 }
 
 void audio_set_volume(int volume_pct) {
