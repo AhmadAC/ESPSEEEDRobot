@@ -43,9 +43,22 @@ static volatile bool isConnected = false;
 static volatile bool captureRequested = false;
 static volatile bool is_streaming = false;
 static bool espnow_initialized = false;
+static bool cam_flipped = true;
 
 static uint8_t pyControllerMac[6];
 static uint8_t cam_mac[6];
+
+// ----------------------------------------------------
+// Camera Video Orientation Flip Routine
+// ----------------------------------------------------
+void cam_toggle_flip() {
+    cam_flipped = !cam_flipped;
+    sensor_t * s = esp_camera_sensor_get();
+    if (s != NULL) {
+        s->set_vflip(s, cam_flipped ? 1 : 0);
+        s->set_hmirror(s, cam_flipped ? 1 : 0);
+    }
+}
 
 // ----------------------------------------------------
 // ESP-NOW Receive Callback (ESP-IDF v5 Signature)
@@ -279,8 +292,11 @@ static void cam_stream_task(void *pvParameters) {
 
 void cam_controller_init() {
     camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer   = LEDC_TIMER_0;
+    
+    // Repinned internal LEDC mapping to avoid conflicting with the 50Hz Servos on Timer 0
+    config.ledc_channel = LEDC_CHANNEL_5;
+    config.ledc_timer   = LEDC_TIMER_2;
+    
     config.pin_d0       = Y2_GPIO_NUM;
     config.pin_d1       = Y3_GPIO_NUM;
     config.pin_d2       = Y4_GPIO_NUM;
@@ -323,8 +339,8 @@ void cam_controller_init() {
 
     sensor_t * s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_vflip(s, 1);   
-        s->set_hmirror(s, 1); 
+        s->set_vflip(s, cam_flipped ? 1 : 0);   
+        s->set_hmirror(s, cam_flipped ? 1 : 0); 
         s->set_framesize(s, FRAMESIZE_QVGA); 
     }
 

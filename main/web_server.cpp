@@ -1,3 +1,4 @@
+
 // main\web_server.cpp
 #include "web_server.h"
 #include "web_html.h"
@@ -52,6 +53,9 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
     
     httpd_resp_send_chunk(req, html_part1, HTTPD_RESP_USE_STRLEN);
     
+    // Send the Robot Camera UI Card
+    httpd_resp_send_chunk(req, html_cam_card, HTTPD_RESP_USE_STRLEN);
+    
     if (sound_en) {
         httpd_resp_send_chunk(req, html_audio_card, HTTPD_RESP_USE_STRLEN);
     }
@@ -89,8 +93,6 @@ static esp_err_t cam_app_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t cam_capture_get_handler(httpd_req_t *req) {
-    if (!is_cam_mode && !is_claw_mode) return ESP_FAIL;
-    
     isCapturing = true; 
     vTaskDelay(pdMS_TO_TICKS(200)); 
     
@@ -123,6 +125,13 @@ static esp_err_t cam_capture_get_handler(httpd_req_t *req) {
     }
     
     isCapturing = false;
+    return ESP_OK;
+}
+
+static esp_err_t cam_flip_post_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    cam_toggle_flip();
+    httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
 
@@ -580,6 +589,8 @@ void web_server_init() {
                 httpd_uri_t uri_audcfg   = { .uri = "/audio_config", .method = HTTP_POST, .handler = audio_config_post_handler, .user_ctx = NULL };
                 httpd_uri_t uri_audply   = { .uri = "/audio_play", .method = HTTP_POST, .handler = audio_play_post_handler, .user_ctx = NULL };
                 httpd_uri_t uri_audstp   = { .uri = "/audio_stop", .method = HTTP_POST, .handler = audio_stop_post_handler, .user_ctx = NULL };
+                httpd_uri_t uri_ccap     = { .uri = "/capture", .method = HTTP_GET, .handler = cam_capture_get_handler, .user_ctx = NULL };
+                httpd_uri_t uri_cflip    = { .uri = "/cam_flip", .method = HTTP_POST, .handler = cam_flip_post_handler, .user_ctx = NULL };
                 
                 httpd_register_uri_handler(server, &uri_servo);
                 httpd_register_uri_handler(server, &uri_act);
@@ -592,6 +603,8 @@ void web_server_init() {
                 httpd_register_uri_handler(server, &uri_audcfg);
                 httpd_register_uri_handler(server, &uri_audply);
                 httpd_register_uri_handler(server, &uri_audstp);
+                httpd_register_uri_handler(server, &uri_ccap);
+                httpd_register_uri_handler(server, &uri_cflip);
             }
             
             httpd_uri_t uri_fallback = { .uri = "/*", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };

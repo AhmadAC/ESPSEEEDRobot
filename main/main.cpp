@@ -252,6 +252,7 @@ extern "C" void app_main(void) {
         web_server_init();
     } else {
         ESP_LOGI(TAG, "Booting Device Profile: ROBOT");
+        cam_controller_init(); // Initialize Camera subsystem in Robot Mode too
         audio_player_init(); 
         sensor_monitor_init();
         servo_controller_init();
