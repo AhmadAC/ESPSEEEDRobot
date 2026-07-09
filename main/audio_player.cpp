@@ -45,19 +45,35 @@ static void load_audio_nvs() {
 }
 
 // ----------------------------------------------------
-// FreeRTOS Task: Dedicated Port 83 Walkie-Talkie RX
+// Clears I2S DMA garbage data & completely disables output
 // ----------------------------------------------------
-static void audio_rx_stream_task(void *pvParameters) {
+static void silence_and_disable_speaker() {
+    int16_t silence_buf[256] = {0};
+    size_t bytes_written = 0;
+    
+    // Explicitly flush the active hardware ring descriptors with clear digital silence
+    for (int i = 0; i < 4; i++) {
+        i2s_channel_write(tx_chan, silence_buf, sizeof(silence_buf), &bytes_written, pdMS_TO_TICKS(10));
+    }
+    
+    // Shut down the I2S clocks and DMA pipeline to eliminate analog state static hiss
+    i2s_channel_disable(tx_chan);
+}
+
+// ----------------------------------------------------
+// FreeRTOS Task: Dedicated Port 82 Live Audio Stream
+// ----------------------------------------------------
+static void audio_stream_task(void *pvParameters) {
     int addr_family = AF_INET;
     int ip_protocol = IPPROTO_IP;
     struct sockaddr_in dest_addr;
     dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(83); // Port 83 is strictly for receiving Phone Microphone PCM Audio
+    dest_addr.sin_port = htons(82); 
 
     int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
     if (listen_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create RX TCP socket: errno %d", errno);
+        ESP_LOGE(TAG, "Unable to create TCP socket: errno %d", errno);
         vTaskDelete(NULL);
         return;
     }
@@ -74,92 +90,6 @@ static void audio_rx_stream_task(void *pvParameters) {
 
     if (listen(listen_sock, 3) != 0) {
         ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        close(listen_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Walkie-Talkie TCP Server listening on Port 83");
-
-    while (1) {
-        struct sockaddr_storage source_addr;
-        socklen_t addr_len = sizeof(source_addr);
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-        if (sock < 0) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Walkie-Talkie App connected! Reconfiguring I2S to 16kHz...");
-        
-        // Stop current audio processing to prevent conflict
-        audio_stop();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        
-        // Match the ESP32 Amplifier to the Android App's 16kHz audio format
-        i2s_channel_disable(tx_chan);
-        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000);
-        i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg);
-        i2s_std_slot_config_t slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-        i2s_channel_reconfig_std_slot(tx_chan, &slot_cfg);
-        i2s_channel_enable(tx_chan);
-
-        uint8_t rx_buffer[1024];
-        
-        while (1) {
-            int len = recv(sock, rx_buffer, sizeof(rx_buffer), 0);
-            if (len <= 0) {
-                break; // Phone stopped holding the button, socket closed
-            }
-
-            int16_t* pcm = (int16_t*)rx_buffer;
-            size_t samples = len / 2;
-            const float HARDWARE_POWER_LIMIT = 0.60f; 
-            float vol_mult = ((float)current_volume / 100.0f) * HARDWARE_POWER_LIMIT;
-
-            for (size_t i = 0; i < samples; i++) {
-                int32_t val = (int32_t)(pcm[i] * vol_mult);
-                if (val > 32767) val = 32767;
-                if (val < -32768) val = -32768;
-                pcm[i] = (int16_t)val;
-            }
-
-            size_t bytes_written;
-            i2s_channel_write(tx_chan, rx_buffer, len, &bytes_written, portMAX_DELAY);
-        }
-        
-        ESP_LOGI(TAG, "Walkie-Talkie stream disconnected.");
-        close(sock);
-    }
-}
-
-// ----------------------------------------------------
-// FreeRTOS Task: Dedicated Port 82 Live Audio Stream
-// ----------------------------------------------------
-static void audio_stream_task(void *pvParameters) {
-    int addr_family = AF_INET;
-    int ip_protocol = IPPROTO_IP;
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(82); 
-
-    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-    if (listen_sock < 0) {
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
-    if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
-        close(listen_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (listen(listen_sock, 3) != 0) {
         close(listen_sock);
         vTaskDelete(NULL);
         return;
@@ -213,6 +143,8 @@ static void audio_stream_task(void *pvParameters) {
 
         send(sock, wav_header, 44, 0);
 
+        ESP_LOGI(TAG, "Audio Live Stream client connected to Port 82!");
+
         uint8_t buf[1024];
         while (1) {
             size_t bytes_read = 0;
@@ -238,7 +170,96 @@ static void audio_stream_task(void *pvParameters) {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
+        ESP_LOGI(TAG, "Audio Live Stream client disconnected.");
         close(sock);
+    }
+}
+
+// ----------------------------------------------------
+// FreeRTOS Task: Dedicated Port 83 Walkie-Talkie RX
+// ----------------------------------------------------
+static void audio_rx_stream_task(void *pvParameters) {
+    int addr_family = AF_INET;
+    int ip_protocol = IPPROTO_IP;
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(83); 
+
+    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "Unable to create RX TCP socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (listen(listen_sock, 3) != 0) {
+        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Walkie-Talkie TCP Server listening on Port 83");
+
+    while (1) {
+        struct sockaddr_storage source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        if (sock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Walkie-Talkie App connected! Reconfiguring I2S to 16kHz...");
+        
+        audio_stop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        i2s_channel_disable(tx_chan);
+        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000);
+        i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg);
+        i2s_std_slot_config_t slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+        i2s_channel_reconfig_std_slot(tx_chan, &slot_cfg);
+        i2s_channel_enable(tx_chan);
+
+        uint8_t rx_buffer[1024];
+        
+        while (1) {
+            int len = recv(sock, rx_buffer, sizeof(rx_buffer), 0);
+            if (len <= 0) {
+                break; 
+            }
+
+            int16_t* pcm = (int16_t*)rx_buffer;
+            size_t samples = len / 2;
+            const float HARDWARE_POWER_LIMIT = 0.60f; 
+            float vol_mult = ((float)current_volume / 100.0f) * HARDWARE_POWER_LIMIT;
+
+            for (size_t i = 0; i < samples; i++) {
+                int32_t val = (int32_t)(pcm[i] * vol_mult);
+                if (val > 32767) val = 32767;
+                if (val < -32768) val = -32768;
+                pcm[i] = (int16_t)val;
+            }
+
+            size_t bytes_written;
+            i2s_channel_write(tx_chan, rx_buffer, len, &bytes_written, portMAX_DELAY);
+        }
+        
+        ESP_LOGI(TAG, "Walkie-Talkie stream disconnected.");
+        close(sock);
+        silence_and_disable_speaker();
     }
 }
 
@@ -248,7 +269,11 @@ static void audio_task(void *pvParameter) {
     while (1) {
         if (xQueueReceive(audio_queue, &sound_req, portMAX_DELAY)) {
             
+            // -------------------------------------------------------------
+            // RECORD 3 SECONDS FROM PDM MIC & PLAY IT BACK
+            // -------------------------------------------------------------
             if (strcmp(sound_req, "record_3s") == 0) {
+                ESP_LOGI(TAG, "Starting 3-second recording from internal PDM mic...");
                 uint32_t sample_rate = 16000;
                 uint16_t channels = 1;
                 uint16_t bit_depth = 16;
@@ -277,7 +302,11 @@ static void audio_task(void *pvParameter) {
                         total_read += bytes_read;
                     }
                     
-                    if (total_read > 0 && !audio_stop_requested) {
+                    if (audio_stop_requested) {
+                        ESP_LOGI(TAG, "Recording interrupted by STOP request.");
+                    } else if (total_read > 0) {
+                        ESP_LOGI(TAG, "Recording complete (%lu bytes). Playing back...", (unsigned long)total_read);
+                        
                         i2s_channel_disable(tx_chan);
                         i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
                         i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg);
@@ -316,17 +345,20 @@ static void audio_task(void *pvParameter) {
                         }
                         
                         if (audio_stop_requested) {
-                            i2s_channel_disable(tx_chan);
-                            i2s_channel_enable(tx_chan);
+                            ESP_LOGI(TAG, "Playback interrupted by STOP request.");
                         } else {
-                            i2s_channel_write(tx_chan, NULL, 0, &bytes_written, portMAX_DELAY);
+                            ESP_LOGI(TAG, "Playback finished.");
                         }
                     }
                     free(record_buffer);
                 } 
+                silence_and_disable_speaker();
                 continue; 
             }
 
+            // -------------------------------------------------------------
+            // PLAY STATIC WAV FILE
+            // -------------------------------------------------------------
             const uint8_t* wav_start = NULL;
             const uint8_t* wav_end = NULL;
             
@@ -365,14 +397,18 @@ static void audio_task(void *pvParameter) {
                 }
 
                 if (audio_data != NULL && data_size > 0) {
+                    // Temporarily disable while configuring clock dynamically
                     i2s_channel_disable(tx_chan);
+                    
                     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
                     i2s_channel_reconfig_std_clock(tx_chan, &clk_cfg);
+                    
                     i2s_std_slot_config_t slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
                         I2S_DATA_BIT_WIDTH_16BIT, 
                         channels == 2 ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO
                     );
                     i2s_channel_reconfig_std_slot(tx_chan, &slot_cfg);
+                    
                     i2s_channel_enable(tx_chan);
                     
                     if (audio_data + data_size > wav_end) {
@@ -408,18 +444,21 @@ static void audio_task(void *pvParameter) {
                         
                         esp_err_t err = i2s_channel_write(tx_chan, out_buffer, chunk_size * 2, &bytes_written, portMAX_DELAY);
                         if (err != ESP_OK) {
+                            ESP_LOGE(TAG, "I2S Buffer Write Failed: %s", esp_err_to_name(err));
                             break; 
                         }
                     }
                     
                     if (audio_stop_requested) {
-                        i2s_channel_disable(tx_chan);
-                        i2s_channel_enable(tx_chan);
+                        ESP_LOGI(TAG, "Audio playback interrupted by STOP request.");
                     } else {
-                        i2s_channel_write(tx_chan, NULL, 0, &bytes_written, portMAX_DELAY);
+                        ESP_LOGI(TAG, "Playback finished.");
                     }
+                } else {
+                    ESP_LOGE(TAG, "Invalid WAV structure.");
                 }
             }
+            silence_and_disable_speaker();
         }
     }
 }
@@ -428,6 +467,7 @@ void audio_player_init() {
     load_audio_nvs();
     audio_queue = xQueueCreate(5, sizeof(char) * 32);
 
+    // Initialize External I2S TX Amplifier
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, NULL));
 
@@ -447,8 +487,12 @@ void audio_player_init() {
     };
     
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
+    
+    // CRITICAL FIX: Keeping the speaker disabled on boot completely silences startup buzzing.
+    // It will dynamically spin up and down only when active audio tracks start.
+    i2s_channel_disable(tx_chan);
 
+    // Initialize Internal PDM RX channel for Microphone
     i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&rx_chan_cfg, NULL, &rx_chan));
 
@@ -508,4 +552,5 @@ void audio_play(const char* sound_name) {
 void audio_stop() {
     audio_stop_requested = true; 
     xQueueReset(audio_queue);    
+    silence_and_disable_speaker(); // Turn off physical clocks instantly
 }
