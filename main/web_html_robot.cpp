@@ -132,6 +132,11 @@ const char html_audio_card[] = R"raw_html(
                     <button class='btn-red' onclick='stopAudio()'>Stop Sound</button>
                 </div>
                 <button class='btn-purple' style='margin-top: 10px;' onclick='recordAudio(this)'>Record & Play (3s)</button>
+                
+                <hr style='border-color:#334155; margin: 15px 0;'>
+                <label>Live Microphone Stream (Wi-Fi/AP):</label>
+                <audio id='mic_stream' controls style='width: 100%; height: 40px; margin-top: 5px; border-radius: 8px;'></audio>
+                <button id='btn_mic_stream' class='btn-blue' style='margin-top: 10px;' onclick='toggleMicStream()'>Start Live Mic</button>
             </div>
         </div>
     </div>
@@ -467,6 +472,28 @@ const char html_part4[] = R"raw_html(
             btn.innerText = "Record & Play (3s)";
             btn.disabled = false;
         }, 6000);
+    }
+
+    let micStreaming = false;
+    function toggleMicStream() {
+        let audioEl = document.getElementById('mic_stream');
+        let btn = document.getElementById('btn_mic_stream');
+        micStreaming = !micStreaming;
+        if(micStreaming) {
+            audioEl.src = 'http://' + window.location.hostname + ':82/';
+            audioEl.play().catch(e => {
+                alert("Autoplay blocked. Please click play on the audio control.");
+            });
+            btn.innerText = 'Stop Live Mic';
+            btn.classList.remove('btn-blue');
+            btn.classList.add('btn-red');
+        } else {
+            audioEl.pause();
+            audioEl.src = '';
+            btn.innerText = 'Start Live Mic';
+            btn.classList.remove('btn-red');
+            btn.classList.add('btn-blue');
+        }
     }
 
     function toggleSync() {

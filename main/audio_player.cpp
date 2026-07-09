@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
+#include "lwip/sockets.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
 #include <string.h>
 
 static const char *TAG = "AUDIO";
@@ -39,6 +42,124 @@ static void load_audio_nvs() {
     }
     if (current_volume < 0) current_volume = 0;
     if (current_volume > 100) current_volume = 100;
+}
+
+// ----------------------------------------------------
+// FreeRTOS Task: Dedicated Port 82 Live Audio Stream
+// ----------------------------------------------------
+static void audio_stream_task(void *pvParameters) {
+    int addr_family = AF_INET;
+    int ip_protocol = IPPROTO_IP;
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(82); // Port 82 is strictly for Live Audio Streaming
+
+    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "Unable to create TCP socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (listen(listen_sock, 3) != 0) {
+        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Audio Raw TCP Stream Server listening on Port 82");
+
+    while (1) {
+        struct sockaddr_storage source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        if (sock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        // Set short timeout to flush incoming HTTP GET request
+        struct timeval timeout;
+        timeout.tv_sec = 1; timeout.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        char rx_buffer[128];
+        recv(sock, rx_buffer, sizeof(rx_buffer), 0); 
+        
+        // Disable timeout for the endless streaming loop
+        timeout.tv_sec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        const char* HEADER = "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+        send(sock, HEADER, strlen(HEADER), 0);
+
+        // Standard endless WAV header configuration 
+        uint32_t sample_rate = 16000;
+        uint16_t bit_depth = 16;
+        uint16_t channels = 1;
+        uint32_t byte_rate = sample_rate * channels * (bit_depth / 8);
+        uint16_t block_align = channels * (bit_depth / 8);
+
+        uint8_t wav_header[44] = {
+            'R', 'I', 'F', 'F',
+            0xFF, 0xFF, 0xFF, 0x7F, // Huge fake file size (~2GB limit) to trick browser into an infinite stream
+            'W', 'A', 'V', 'E',
+            'f', 'm', 't', ' ',
+            16, 0, 0, 0,
+            1, 0,
+            (uint8_t)channels, 0,
+            (uint8_t)(sample_rate & 0xFF), (uint8_t)((sample_rate >> 8) & 0xFF), (uint8_t)((sample_rate >> 16) & 0xFF), (uint8_t)((sample_rate >> 24) & 0xFF),
+            (uint8_t)(byte_rate & 0xFF), (uint8_t)((byte_rate >> 8) & 0xFF), (uint8_t)((byte_rate >> 16) & 0xFF), (uint8_t)((byte_rate >> 24) & 0xFF),
+            (uint8_t)block_align, 0,
+            (uint8_t)bit_depth, 0,
+            'd', 'a', 't', 'a',
+            0xFF, 0xFF, 0xFF, 0x7F // Huge fake data size
+        };
+
+        send(sock, wav_header, 44, 0);
+        ESP_LOGI(TAG, "Audio Live Stream client connected to Port 82!");
+
+        uint8_t buf[1024];
+        while (1) {
+            size_t bytes_read = 0;
+            esp_err_t err = i2s_channel_read(rx_chan, buf, sizeof(buf), &bytes_read, pdMS_TO_TICKS(100));
+            
+            if (err == ESP_OK && bytes_read > 0) {
+                // Apply a powerful software boost directly in RAM so it is clearly audible on the phone
+                int16_t* pcm = (int16_t*)buf;
+                size_t samples = bytes_read / 2;
+                const float STREAM_GAIN = 10.0f; // Significant volume boost
+                
+                for (size_t i = 0; i < samples; i++) {
+                    int32_t val = (int32_t)(pcm[i] * STREAM_GAIN);
+                    if (val > 32767) val = 32767;
+                    if (val < -32768) val = -32768;
+                    pcm[i] = (int16_t)val;
+                }
+
+                int sent = send(sock, buf, bytes_read, 0);
+                if (sent < 0) {
+                    break; // Client disconnected or network dropped
+                }
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        }
+        ESP_LOGI(TAG, "Audio stream client disconnected.");
+        close(sock);
+    }
 }
 
 static void audio_task(void *pvParameter) {
@@ -320,6 +441,9 @@ void audio_player_init() {
 
     // Run audio handling strictly on Core 1 to avoid interrupting Servo PWM
     xTaskCreatePinnedToCore(audio_task, "audio_task", 4096, NULL, 4, NULL, 1);
+    
+    // Run the new dedicated TCP stream handler for sending audio to Phones/Browsers over Wi-Fi
+    xTaskCreatePinnedToCore(audio_stream_task, "audio_stream_task", 4096, NULL, 3, NULL, 1);
     
     ESP_LOGI(TAG, "I2S Audio TX initialized on pins: BCLK=%d, LRC=%d, DIN=%d", I2S_BCLK_PIN, I2S_LRC_PIN, I2S_DIN_PIN);
     ESP_LOGI(TAG, "I2S PDM RX initialized on pins: CLK=%d, DAT=%d", I2S_MIC_CLK_PIN, I2S_MIC_DAT_PIN);
