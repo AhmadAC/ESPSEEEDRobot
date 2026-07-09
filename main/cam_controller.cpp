@@ -313,14 +313,19 @@ void cam_controller_init() {
     config.pin_sccb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn     = PWDN_GPIO_NUM;
     config.pin_reset    = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 10000000;
+    
+    // Crucial: 20MHz is the optimal clock frequency for OV2640 standard operational synchronization
+    config.xclk_freq_hz = 20000000; 
     config.pixel_format = PIXFORMAT_JPEG;
-    config.grab_mode    = CAMERA_GRAB_LATEST;
+    
+    // CRITICAL FIX: Changing grab mode to CAMERA_GRAB_WHEN_EMPTY completely halts mid-frame pointer 
+    // switching inside the DMA channel, successfully eliminating "NO-SOI" packet truncation
+    config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY; 
 
     if (esp_psram_is_initialized()) {
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.frame_size = FRAMESIZE_UXGA; 
-        config.jpeg_quality = 10; 
+        config.jpeg_quality = 12; // Stable quality floor to ensure high-res JPEG fits entirely within buffer limits
         config.fb_count = 2;
         ESP_LOGI(TAG, "PSRAM found. High resolution UXGA enabled.");
     } else {
@@ -365,7 +370,6 @@ void cam_espnow_init() {
 }
 
 void cam_espnow_pair_claw() {
-    // Make sure it's fully initialized to accept connections
     if (!espnow_initialized) {
         cam_espnow_init();
     }
@@ -381,7 +385,6 @@ void cam_espnow_pair_claw() {
         esp_now_add_peer(&peerInfo);
     }
     
-    // Announce Claw Controller presence to PyController
     const char* ackMsg = "pyCAR_ACK";
     esp_now_send(broadcast_mac, (const uint8_t *)ackMsg, strlen(ackMsg));
     

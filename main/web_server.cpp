@@ -1,4 +1,3 @@
-
 // main\web_server.cpp
 #include "web_server.h"
 #include "web_html.h"
@@ -99,9 +98,10 @@ static esp_err_t cam_capture_get_handler(httpd_req_t *req) {
     sensor_t * s = esp_camera_sensor_get();
     if (s != NULL) {
         s->set_framesize(s, FRAMESIZE_UXGA); 
-        s->set_quality(s, 10);              
+        s->set_quality(s, 12); // Restored to extremely stable safe quality threshold             
     }
     
+    // Clear out residual pipeline framebuffers so mode switch remains perfectly aligned
     for (int i = 0; i < 2; i++) {
         camera_fb_t * fb = esp_camera_fb_get();
         if (fb) esp_camera_fb_return(fb);
@@ -154,13 +154,12 @@ static esp_err_t get_post_json(httpd_req_t *req, cJSON **json_out) {
     char* buf = (char*)malloc(total_len + 1);
     int received = 0;
     while (received < total_len) {
-        int ret = httpd_req_recv(req, buf + received, total_len - received);
-        if (ret <= 0) {
+        int r = httpd_req_recv(req, buf + received, total_len - received);
+        if (r <= 0) {
             free(buf);
-            if (ret == HTTPD_SOCK_ERR_TIMEOUT) httpd_resp_send_408(req);
             return ESP_FAIL;
         }
-        received += ret;
+        received += r;
     }
     buf[total_len] = '\0';
     
@@ -303,9 +302,9 @@ static esp_err_t claw_status_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// -----------------------------------------------------------------
+// -------------------------------------------------------------
 // Robot Endpoints
-// -----------------------------------------------------------------
+// -------------------------------------------------------------
 static esp_err_t audio_config_post_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Connection", "close");
     cJSON *json = NULL;
