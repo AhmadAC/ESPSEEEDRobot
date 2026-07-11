@@ -12,12 +12,16 @@
 #include "lwip/sockets.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include <arpa/inet.h>
+#include "mdns.h"
+#include "ble_manager.h"
 
 static const char *TAG = "WIFI_MGR";
 
 static int64_t disconnect_time = 0;
 static bool ap_fallback_active = false;
 static TaskHandle_t dns_task_handle = NULL;
+static TaskHandle_t udp_task_handle = NULL;
 
 /* ==============================================
    DNS CAPTIVE PORTAL TASK
@@ -57,40 +61,50 @@ static void dns_server_task(void *pvParameters) {
         }
 
         if (len > 12) {
-            // Very basic DNS response to forward all traffic to 192.168.4.1 (The AP IP)
-            rx_buffer[2] = 0x81; // Flags: Standard query response, No error
+            rx_buffer[2] = 0x81; 
             rx_buffer[3] = 0x80;
-            rx_buffer[6] = rx_buffer[4]; // Answer RRs = Question RRs
+            rx_buffer[6] = rx_buffer[4]; 
             rx_buffer[7] = rx_buffer[5];
-            rx_buffer[8] = 0; rx_buffer[9] = 0; // Authority RRs
-            rx_buffer[10] = 0; rx_buffer[11] = 0; // Additional RRs
+            rx_buffer[8] = 0; rx_buffer[9] = 0; 
+            rx_buffer[10] = 0; rx_buffer[11] = 0; 
             
             int pos = len;
-            // Answer header (Pointer to question)
-            rx_buffer[pos++] = 0xC0;
-            rx_buffer[pos++] = 0x0C;
-            // Type A
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x01;
-            // Class IN
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x01;
-            // TTL (60)
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x3C;
-            // Data length (4)
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x04;
-            // IP Address (192.168.4.1)
-            rx_buffer[pos++] = 192;
-            rx_buffer[pos++] = 168;
-            rx_buffer[pos++] = 4;
-            rx_buffer[pos++] = 1;
+            rx_buffer[pos++] = 0xC0; rx_buffer[pos++] = 0x0C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x3C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x04;
+            rx_buffer[pos++] = 192; rx_buffer[pos++] = 168;
+            rx_buffer[pos++] = 4; rx_buffer[pos++] = 1;
             
             sendto(sock, rx_buffer, pos, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
         }
+    }
+}
+
+/* ==============================================
+   FAST UDP HEARTBEAT BROADCAST TASK
+   ============================================== */
+static void udp_broadcast_task(void *pvParameters) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    int broadcast = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(4210);
+    dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+    
+    while (1) {
+        esp_netif_ip_info_t ip_info;
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "ROBOT_DOG_IP:" IPSTR, IP2STR(&ip_info.ip));
+            sendto(sock, msg, strlen(msg), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -98,12 +112,10 @@ static void dns_server_task(void *pvParameters) {
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         
-        // Start the failure timer if it hasn't started yet
         if (disconnect_time == 0) {
             disconnect_time = esp_timer_get_time();
         }
         
-        // Calculate how many seconds we've been disconnected
         int64_t elapsed_sec = (esp_timer_get_time() - disconnect_time) / 1000000;
         
         if (elapsed_sec >= 300) {
@@ -115,19 +127,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
                 if (dns_task_handle == NULL) {
                     xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle);
                 }
-
-                ESP_LOGI(TAG, "===============================================");
-                ESP_LOGI(TAG, "AP Mode Fallback Active.");
-                ESP_LOGI(TAG, "Connect phone/PC to Wi-Fi: ESPRobot_Config");
-                ESP_LOGI(TAG, "Dashboard available at: http://192.168.4.1/");
-                ESP_LOGI(TAG, "===============================================");
             }
             ESP_LOGW(TAG, "Disconnected from Wi-Fi. AP Active. Retrying STA in 3s...");
         } else {
             ESP_LOGW(TAG, "Disconnected from Wi-Fi. Retrying STA in 3s... (AP fallback in %d s)", (int)(300 - elapsed_sec));
         }
         
-        vTaskDelay(pdMS_TO_TICKS(3000)); // 3 second delay prevents spamming the AP
+        vTaskDelay(pdMS_TO_TICKS(3000)); 
         esp_wifi_connect();
         
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -138,32 +144,54 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         ESP_LOGI(TAG, "Dashboard available at: http://" IPSTR "/", IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "===============================================");
         
-        // Reset our failure timer and state
         disconnect_time = 0;
         ap_fallback_active = false;
-        
-        // Disable Setup AP mode to lock the radio onto the router's channel
-        // This eliminates radio channel-hopping, massive latency, and dropped packets
-        ESP_LOGI(TAG, "Disabling AP Mode to prevent cross-channel interference and speed up server.");
         esp_wifi_set_mode(WIFI_MODE_STA);
+
+        // Notify BLE Manager of the newly assigned IP so Android can close the provisioning setup
+        char ip_str[32];
+        snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&event->ip_info.ip));
+        ble_manager_notify_ip(ip_str);
+
+        // Start mDNS Background Service
+        mdns_init();
+        mdns_hostname_set("robotdog");
+        mdns_instance_name_set("ESP32 Robot");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+        mdns_service_add(NULL, "_camera", "_tcp", 81, NULL, 0);
+
+        // Start UDP Heartbeat Broadcaster
+        if (udp_task_handle == NULL) {
+            xTaskCreate(udp_broadcast_task, "udp_bcast", 2048, NULL, 5, &udp_task_handle);
+        }
     }
 }
 
+void wifi_manager_connect_async(const char* ssid, const char* pass) {
+    wifi_config_t sta_config = {};
+    strncpy((char*)sta_config.sta.ssid, ssid, 32);
+    strncpy((char*)sta_config.sta.password, pass, 64);
+    sta_config.sta.listen_interval = 5;
+    
+    ESP_LOGI(TAG, "Asynchronous connection triggered via BLE for SSID: %s", ssid);
+    esp_wifi_disconnect();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    esp_wifi_connect();
+}
+
 void wifi_manager_init() {
-    // Create underlying default Wi-Fi network interfaces
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Register basic event handlers for drops and IP assignment
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
 
-    // Force default IP mapping on the AP so iOS/Android captive portals map safely
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
@@ -175,7 +203,6 @@ void wifi_manager_init() {
         esp_netif_dhcps_start(ap_netif);
     }
 
-    // Configure AP Mode profile (CRITICAL FIX: Matching the WPA2_PSK of the IR AC code)
     wifi_config_t ap_config = {};
     strcpy((char*)ap_config.ap.ssid, "ESPRobot_Config");
     strcpy((char*)ap_config.ap.password, "12345678");
@@ -184,7 +211,6 @@ void wifi_manager_init() {
     ap_config.ap.max_connection = 4;
     ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK; 
 
-    // Temporarily set APSTA so we can apply the hardware AP config without ESP_ERR_WIFI_MODE
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     
@@ -194,7 +220,6 @@ void wifi_manager_init() {
     char ssid[33] = {0}; 
     char pass[65] = {0};
 
-    // Auto-Connect Station sequentially if configurations exist
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
         nvs_get_u8(my_handle, "force_ap", &force_ap_u8);
         size_t s_len = sizeof(ssid); 
@@ -209,48 +234,33 @@ void wifi_manager_init() {
     }
 
     if (has_creds) {
-        // Boot straight into STA mode, AP is disabled natively to avoid radio interference
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ap_fallback_active = false;
     } else {
         if (force_ap_u8 == 1) ESP_LOGI(TAG, "AP Mode forced by User Preference.");
         else ESP_LOGI(TAG, "No Valid Credentials Found. Launching AP Config Mode...");
         
-        // No credentials or forced AP, leave APSTA active immediately so the user can configure
         ap_fallback_active = true;
         
         if (dns_task_handle == NULL) {
             xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle);
         }
-
-        ESP_LOGI(TAG, "===============================================");
-        ESP_LOGI(TAG, "AP Mode Active.");
-        ESP_LOGI(TAG, "Connect phone/PC to Wi-Fi: ESPRobot_Config");
-        ESP_LOGI(TAG, "Dashboard available at: http://192.168.4.1/");
-        ESP_LOGI(TAG, "===============================================");
     }
     
-    // Explicitly mirror the old working code: Start Wi-Fi FIRST before connecting
     ESP_ERROR_CHECK(esp_wifi_start());
 
     if (has_creds) {
         ESP_LOGI(TAG, "Connecting to saved network: %s", ssid);
         wifi_config_t sta_config = {};
         
-        // Safely copy string payload over to hardware configurations
         strncpy((char*)sta_config.sta.ssid, ssid, 32);
         strncpy((char*)sta_config.sta.password, pass, 64);
         
-        // =========================================================================
-        // FRINGE SIGNAL MITIGATION (For -85dBm and weaker networks)
-        // 1. Tell the router we might miss up to 5 network pulses so it doesn't kick us
-        // 2. Command the internal amplifier to broadcast at absolute maximum (21 dBm)
-        // =========================================================================
         sta_config.sta.listen_interval = 5; 
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
-        esp_wifi_set_max_tx_power(84); // 84 * 0.25dBm = 21dBm Max Output
+        esp_wifi_set_max_tx_power(84); 
         
-        disconnect_time = esp_timer_get_time(); // Start the 300s failure countdown
+        disconnect_time = esp_timer_get_time(); 
         esp_wifi_connect();
     } else {
         ESP_LOGW(TAG, "No Wi-Fi credentials found. AP Mode only.");
@@ -258,7 +268,6 @@ void wifi_manager_init() {
 }
 
 char* wifi_scan_networks_json() {
-    // Explicitly mirror the old working code: Never drop the active connection to scan
     esp_wifi_scan_stop();
     
     wifi_scan_config_t scan_config = {};
@@ -272,7 +281,6 @@ char* wifi_scan_networks_json() {
         esp_wifi_scan_get_ap_num(&ap_count);
         
         if (ap_count > 0) {
-            // Cap count at a safe maximum value to prevent stack overflows
             if (ap_count > 30) {
                 ap_count = 30;
             }
