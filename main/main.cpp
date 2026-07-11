@@ -1,4 +1,4 @@
-// main\main.cpp
+// main/main.cpp
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -64,11 +64,11 @@ static void console_read_task(void *pvParameter) {
         int len = read(fd, buf, sizeof(buf));
         if (len > 0) {
             for (int i = 0; i < len; i++) {
-                if (buf[i] == 0x03) { // Ctrl+C (Interrupt)
+                if (buf[i] == 0x03) { 
                     ESP_LOGW("REPL", "[Sent Ctrl+C - Interrupt]");
                     if (is_claw_mode) claw_execute_command("stop");
                     else if (!is_cam_mode) servo_set_action("stop");
-                } else if (buf[i] == 0x04) { // Ctrl+D (Soft Reboot)
+                } else if (buf[i] == 0x04) { 
                     ESP_LOGW("REPL", "[Sent Ctrl+D - Soft Reboot]");
                     vTaskDelay(pdMS_TO_TICKS(100));
                     esp_restart();
@@ -175,7 +175,6 @@ static void console_read_task(void *pvParameter) {
                                 ESP_LOGW("REPL", "ESP-NOW pairing via REPL is configured for Claw/Cam Mode.");
                             }
                         } else if (is_claw_mode) {
-                            // Route the Claw actions dynamically
                             bool is_numeric = true;
                             int cmd_len = strlen(cmd);
                             for (int j = 0; j < cmd_len; j++) {
@@ -196,7 +195,6 @@ static void console_read_task(void *pvParameter) {
                                 claw_execute_command(cmd); 
                             }
                         } else if (!is_cam_mode) {
-                            // Robot Mode specific commands
                             int ang = 0;
                             if (strcmp(cmd, "sit") == 0 || strcmp(cmd, "stand") == 0 || strcmp(cmd, "forward") == 0 ||
                                 strcmp(cmd, "backward") == 0 || strcmp(cmd, "step_forward") == 0 || strcmp(cmd, "step_backward") == 0 ||
@@ -254,8 +252,8 @@ extern "C" void app_main(void) {
     }
 
     // --- Suppress Noisy Internal Framework Warnings ---
-    esp_log_level_set("wifi", ESP_LOG_ERROR);    // Hides "no need to send deauth"
-    esp_log_level_set("cam_hal", ESP_LOG_NONE);  // Hides "NO-SOI - JPEG start marker missing"
+    esp_log_level_set("wifi", ESP_LOG_ERROR);    
+    esp_log_level_set("cam_hal", ESP_LOG_NONE);  
     // --------------------------------------------------
 
     // 2. Setup Base Network Event Loop
@@ -286,20 +284,23 @@ extern "C" void app_main(void) {
         web_server_init();
     } else if (is_cam_mode) {
         ESP_LOGI(TAG, "Booting Device Profile: CAM");
-        wifi_manager_init(); // Needs to initialize before ESP-NOW
+        wifi_manager_init(); 
         cam_controller_init();
         cam_espnow_init();
         web_server_init();
     } else {
         ESP_LOGI(TAG, "Booting Device Profile: ROBOT");
-        cam_controller_init(); // Initialize Camera subsystem in Robot Mode too
+        cam_controller_init(); 
         audio_player_init(); 
         sensor_monitor_init();
         servo_controller_init();
         
+        // CRITICAL FIX: ALWAYS start BLE, even in Wi-Fi mode. 
+        // This ensures the Android app can always provision new Wi-Fi credentials via Bluetooth.
+        ble_manager_init();
+
         if (strcmp(boot_mode, "bt") == 0) {
             ESP_LOGI(TAG, "Booting in BLUETOOTH Mode. (Wi-Fi Disabled)");
-            ble_manager_init();
         } else {
             ESP_LOGI(TAG, "Booting in WI-FI Mode.");
             wifi_manager_init();
