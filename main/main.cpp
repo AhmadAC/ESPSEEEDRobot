@@ -21,6 +21,9 @@
 #include "ble_manager.h"
 #include "audio_player.h"
 
+// Failsafe forward declaration to guarantee compilation
+extern void web_server_init();
+
 static const char *TAG = "MAIN";
 
 bool is_claw_mode = false; 
