@@ -1,9 +1,11 @@
+// main\ble_manager.cpp
 #include "ble_manager.h"
 #include "esp_log.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 #include "servo_controller.h"
 #include "wifi_manager.h"
 #include <string.h>
@@ -102,14 +104,40 @@ static void ble_app_on_sync(void);
 
 // Tracks NimBLE internal connection status so we know who to notify
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
-    if (event->type == BLE_GAP_EVENT_CONNECT) {
-        if (event->connect.status == 0) {
-            active_conn_handle = event->connect.conn_handle;
-            ESP_LOGI(TAG, "BLE Client Connected!");
-        }
-    } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
-        active_conn_handle = 0;
-        ble_app_on_sync();
+    switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            if (event->connect.status == 0) {
+                active_conn_handle = event->connect.conn_handle;
+                ESP_LOGI(TAG, "BLE Client Connected!");
+            } else {
+                ESP_LOGE(TAG, "BLE Connection failed! Status: %d", event->connect.status);
+                // CRITICAL FIX: Restart advertising if an inbound connection attempt fails
+                ble_app_on_sync(); 
+            }
+            break;
+
+        case BLE_GAP_EVENT_DISCONNECT:
+            ESP_LOGW(TAG, "BLE Client Disconnected! Reason: %d", event->disconnect.reason);
+            active_conn_handle = 0;
+            ble_app_on_sync();
+            break;
+
+        case BLE_GAP_EVENT_ADV_COMPLETE:
+            ESP_LOGI(TAG, "BLE Advertising completed. Restarting...");
+            ble_app_on_sync();
+            break;
+
+        case BLE_GAP_EVENT_SUBSCRIBE:
+            ESP_LOGI(TAG, "BLE Client Subscribed to Characteristic");
+            break;
+
+        case BLE_GAP_EVENT_MTU:
+            ESP_LOGI(TAG, "BLE MTU Updated to %d bytes", event->mtu.value);
+            break;
+            
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            ESP_LOGI(TAG, "BLE Connection Parameters Updated");
+            break;
     }
     return 0;
 }
@@ -124,6 +152,13 @@ static void ble_app_on_sync(void) {
     fields.name = (uint8_t *)"ESPRobot";
     fields.name_len = 8;
     fields.name_is_complete = 1;
+    
+    // CRITICAL FIX: Broadcast the primary service UUID so Android apps can filter/discover it easily
+    ble_uuid16_t adv_uuids[] = { svc_uuid };
+    fields.uuids16 = adv_uuids;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+    
     ble_gap_adv_set_fields(&fields);
 
     struct ble_gap_adv_params adv_params;
@@ -154,6 +189,10 @@ void ble_manager_init() {
     nimble_port_init();
     ble_svc_gap_device_name_set("ESPRobot");
     ble_svc_gap_init();
+    
+    // CRITICAL FIX: Ensures mandatory Android BLE baseline checks pass gracefully
+    ble_svc_gatt_init(); 
+    
     ble_gatts_count_cfg(gatt_svcs);
     ble_gatts_add_svcs(gatt_svcs);
     ble_hs_cfg.sync_cb = ble_app_on_sync;
