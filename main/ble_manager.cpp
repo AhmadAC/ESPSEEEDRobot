@@ -109,6 +109,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             if (event->connect.status == 0) {
                 active_conn_handle = event->connect.conn_handle;
                 ESP_LOGI(TAG, "BLE Client Connected!");
+                
+                // CRITICAL FIX: Force the Web Server AP on when someone connects directly via Bluetooth!
+                wifi_manager_force_ap_temporary();
             } else {
                 ESP_LOGE(TAG, "BLE Connection failed! Status: %d", event->connect.status);
                 // CRITICAL FIX: Restart advertising if an inbound connection attempt fails
@@ -187,6 +190,14 @@ void ble_manager_notify_ip(const char* ip) {
 
 void ble_manager_init() {
     nimble_port_init();
+    
+    // CRITICAL FIX: Accept direct Android OS Bluetooth Pairing ("Just Works")
+    // This stops the phone's native Bluetooth settings from rejecting the connection.
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding = 0;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 0;
+    
     ble_svc_gap_device_name_set("ESPRobot");
     ble_svc_gap_init();
     

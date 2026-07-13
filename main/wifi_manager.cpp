@@ -319,3 +319,14 @@ void wifi_save_credentials(const char* ssid, const char* pass) {
         ESP_LOGE(TAG, "Failed to open NVS to save credentials!");
     }
 }
+
+void wifi_manager_force_ap_temporary() {
+    ESP_LOGI(TAG, "BLE Connection detected! Forcing AP Mode ON temporarily so Web Server is accessible.");
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    ap_fallback_active = true;
+    
+    // Wake up the captive portal DNS so phones immediately launch the browser
+    if (dns_task_handle == NULL) {
+        xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle);
+    }
+}
