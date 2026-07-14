@@ -454,11 +454,18 @@ void servo_controller_init() {
     chan_cfg.gpio_num = SERVO_HIGH_LEFT_PIN;  chan_cfg.channel = SERVO_HIGH_LEFT_CH;  ledc_channel_config(&chan_cfg);
     chan_cfg.gpio_num = SERVO_LOW_RIGHT_PIN;  chan_cfg.channel = SERVO_LOW_RIGHT_CH;  ledc_channel_config(&chan_cfg);
 
-    servo_set_action("stop");
+    // CRITICAL CURRENT FIX: Do NOT apply active PWM on boot.
+    // Keep duty at 0 so servos remain completely unpowered (relaxed) until an explicit command is received.
+    // This completely prevents overcurrent shutdowns when plugged into a PC!
+    active_animation = 0;
+    target_low_left   = 90;
+    target_high_right = 90;
+    target_high_left  = 90;
+    target_low_right  = 90;
     
     // Explicitly pin to Core 0 so it NEVER interrupts the Wi-Fi/Web Server (Core 1)
     xTaskCreatePinnedToCore(servo_animation_task, "anim_task", 4096, NULL, 5, NULL, 0);
-    ESP_LOGI(TAG, "Hardware PWM and Action Task Initialized");
+    ESP_LOGI(TAG, "Hardware PWM Initialized (Relaxed on boot)");
 }
 
 void servo_set_target(const char* id, int angle) {
@@ -659,8 +666,8 @@ char* servo_get_calibrations_json() {
 }
 
 char* servo_get_calibrations_cpp() {
-    char* buf = (char*)malloc(1024);
-    snprintf(buf, 1024,
+    char* dbuf = (char*)malloc(1024);
+    snprintf(dbuf, 1024,
         "// =========================================================\n"
         "// ESPRobot Calibration Defaults\n"
         "// Replace the block in servo_controller.cpp with these lines\n"
@@ -687,5 +694,5 @@ char* servo_get_calibrations_cpp() {
         poses[3].ll, poses[3].hr, poses[3].hl, poses[3].lr,
         poses[4].ll, poses[4].hr, poses[4].hl, poses[4].lr
     );
-    return buf;
+    return dbuf;
 }
