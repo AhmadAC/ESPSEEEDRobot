@@ -312,6 +312,7 @@ void wifi_save_credentials(const char* ssid, const char* pass) {
     if (err == ESP_OK) {
         nvs_set_str(my_handle, "wifi_ssid", ssid);
         nvs_set_str(my_handle, "wifi_pass", pass);
+        nvs_set_u8(my_handle, "force_ap", 0); // Critically forces the robot to unset AP mode when loading custom credentials
         nvs_commit(my_handle);
         nvs_close(my_handle);
         ESP_LOGI(TAG, "Saved SSID: %s", ssid);
